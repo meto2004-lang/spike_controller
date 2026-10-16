@@ -19,6 +19,6 @@ jobs:
       - name: Verify transport imports without connecting hardware
         run: python -c "from pybricksdev.connections.pybricks import PybricksHubBLE, PybricksHubUSB; import serial, libusb_package"
       - name: Compile application
-        run: python -m py_compile spike_core.py spike_controller.py
+        run: python -m py_compile spike_core.py spike_transfer.py spike_controller.py
       - name: Headless regression tests (no robot required)
         run: python -W error::RuntimeWarning -m unittest discover -s tests -v

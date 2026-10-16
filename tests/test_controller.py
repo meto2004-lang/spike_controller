@@ -7,7 +7,7 @@ import tempfile
 import threading
 import types
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from spike_core import EventQueue, MAX_LINE_BYTES
 
@@ -87,6 +87,7 @@ def app_fixture():
     app.connected = False
     app.hub = None
     app._worker_hub = None
+    app._download_uncertain = False
     app.capture = None
     app.ERR = 'red'
     app.OK = 'green'
@@ -579,6 +580,13 @@ class WorkerIntegrationTests(unittest.TestCase):
 
 
 class AsyncOperationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.logs = patch.object(controller, 'LOG_DIR', directory.name)
+        self.logs.start()
+        self.addCleanup(self.logs.stop)
+
     async def test_interrupt_waits_for_cancellation_cleanup_before_stopping(self):
         app = app_fixture()
         entered = asyncio.Event()
@@ -663,6 +671,23 @@ class AsyncOperationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(('hub_state', 'disconnected', hub, True), list(app.queue.queue))
         self.assertIsNone(app._disconnecting_hub)
 
+    async def test_connected_ble_hub_gets_safe_write_limit_and_version_log(self):
+        app = app_fixture()
+        hub = types.SimpleNamespace(
+            _max_write_size=244, fw_version='4.1.0', connect=AsyncMock(), disconnect=AsyncMock())
+        app._install_capture = MagicMock()
+        device = types.SimpleNamespace(name='Hyena')
+        with patch.object(controller, 'PB_OK', True), \
+                patch.object(controller, 'find_device', AsyncMock(return_value=device), create=True), \
+                patch.object(controller, 'PybricksHubBLE', lambda dev: hub, create=True):
+            result = await app.op_connect('Hyena')
+        self.assertIs(result, hub)
+        self.assertEqual(hub._max_write_size, 20)
+        app._install_capture.assert_called_once_with(hub)
+        messages = '\n'.join(m[1] for m in app.queue.queue if m[0] == 'console')
+        self.assertIn('BLE write_size=20 hub_limit=244', messages)
+        self.assertIn('firmware=4.1.0', messages)
+
     async def test_connect_cancellation_disconnects_partial_hub(self):
         app = app_fixture()
         entered = asyncio.Event()
@@ -686,6 +711,112 @@ class AsyncOperationTests(unittest.IsolatedAsyncioTestCase):
                 await task
         self.assertEqual(disconnected, [True])
         self.assertIsNone(app._worker_hub)
+
+
+class TransferPipelineTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.logs = patch.object(controller, 'LOG_DIR', self.directory.name)
+        self.logs.start()
+        self.addCleanup(self.logs.stop)
+        self.app = app_fixture()
+        self.hub = types.SimpleNamespace(
+            fw_version='4.1.0', _mpy_abi_version=0,
+            status_observable=types.SimpleNamespace(value=0),
+            stop_user_program=AsyncMock(), download=AsyncMock(), run=AsyncMock())
+        self.app._worker_hub = self.hub
+
+    async def test_modern_upload_finishes_before_start(self):
+        order = []
+        self.hub.stop_user_program.side_effect = lambda: order.append('stop')
+        self.hub.download.side_effect = lambda path: order.append('download')
+        self.hub.run.side_effect = lambda *a, **kw: order.append('start')
+        await self.app.op_send_run('program.py', False)
+        self.assertEqual(order, ['stop', 'download', 'start'])
+        self.hub.download.assert_awaited_once_with('program.py')
+        self.hub.run.assert_awaited_once_with(None, wait=False, print_output=False, line_handler=True)
+        self.assertFalse(self.app._download_uncertain)
+
+    async def test_wait_mode_is_forwarded_without_uploading_twice(self):
+        await self.app.op_send_run('program.py', True)
+        self.hub.download.assert_awaited_once_with('program.py')
+        self.hub.run.assert_awaited_once_with(None, wait=True, print_output=False, line_handler=True)
+
+    async def test_gatt_upload_failure_is_not_retried_or_started(self):
+        class BleakGATTProtocolError(Exception):
+            pass
+        original = BleakGATTProtocolError(14, 'GATT Protocol Error: Unlikely Error')
+        self.hub.download.side_effect = original
+        with self.assertRaises(controller.TransferFailure) as result:
+            await self.app.op_send_run('program.py', False)
+        self.assertEqual(result.exception.phase, 'compile-upload')
+        self.assertIs(result.exception.__cause__, original)
+        self.hub.download.assert_awaited_once()
+        self.hub.run.assert_not_awaited()
+        self.assertTrue(self.app._download_uncertain)
+        text = (Path(self.directory.name) / 'transfer_errors.log').read_text(encoding='utf-8')
+        self.assertIn('firmware=4.1.0', text)
+        self.assertIn('phase=compile-upload', text)
+        self.assertIn('BleakGATTProtocolError', text)
+        with self.assertRaises(RuntimeError):
+            await self.app.op_run_stored()
+        self.hub.run.assert_not_awaited()
+
+    async def test_start_error_is_distinct_and_not_retried(self):
+        self.hub.run.side_effect = OSError('ack lost')
+        with self.assertRaises(controller.TransferFailure) as result:
+            await self.app.op_send_run('program.py', False)
+        self.assertEqual(result.exception.phase, 'start')
+        self.hub.download.assert_awaited_once()
+        self.hub.run.assert_awaited_once()
+        self.assertFalse(self.app._download_uncertain)
+
+    async def test_busy_hub_prevents_upload(self):
+        with patch.object(controller, 'wait_hub_idle', side_effect=TimeoutError('still busy')):
+            with self.assertRaises(controller.TransferFailure) as result:
+                await self.app.op_send_run('program.py', False)
+        self.assertEqual(result.exception.phase, 'stop-ready')
+        self.hub.download.assert_not_awaited()
+        self.hub.run.assert_not_awaited()
+
+    async def test_cancelled_upload_cannot_run_stored_or_start_late(self):
+        entered = asyncio.Event()
+        async def upload(path):
+            entered.set()
+            await asyncio.Event().wait()
+        self.hub.download.side_effect = upload
+        task = asyncio.create_task(self.app.op_send_run('program.py', False))
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.hub.run.assert_not_awaited()
+        self.assertTrue(self.app._download_uncertain)
+        with self.assertRaises(RuntimeError):
+            await self.app.op_run_stored()
+
+    async def test_download_only_does_not_start_and_clears_previous_failure(self):
+        self.app._download_uncertain = True
+        await self.app.op_download_only('program.py')
+        self.hub.download.assert_awaited_once_with('program.py')
+        self.hub.run.assert_not_awaited()
+        self.assertFalse(self.app._download_uncertain)
+
+    async def test_legacy_run_fallback_remains_available(self):
+        self.hub._mpy_abi_version = 6
+        await self.app.op_send_run('program.py', False)
+        self.hub.download.assert_not_awaited()
+        self.hub.run.assert_awaited_once_with('program.py', wait=False, print_output=False, line_handler=True)
+
+    async def test_trace_file_failure_does_not_mask_original_error(self):
+        original = OSError('transport failed')
+        self.hub.download.side_effect = original
+        with patch.object(controller, 'LOG_DIR', str(Path(self.directory.name) / 'missing')), \
+                patch.object(controller.traceback, 'print_exc'):
+            with self.assertRaises(controller.TransferFailure) as result:
+                await self.app.op_send_run('program.py', False)
+        self.assertIs(result.exception.__cause__, original)
 
 
 if __name__ == '__main__':
