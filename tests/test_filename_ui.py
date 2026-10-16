@@ -1,5 +1,6 @@
 """Optional real-Tk layout regression tests (Linux CI runs these under Xvfb)."""
 from pathlib import Path
+import os
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
@@ -56,7 +57,8 @@ class FilenameLayoutTests(unittest.TestCase):
         self.assertEqual(self.app.lbl_file.cget('text'), path.name)
         self.assertIn(path.name, self.root.title())
         self.assertLess(self.app.lbl_file.winfo_rooty(), self.app.editor.winfo_rooty())
-        self.assertEqual(self.app.file_path_var.get(), str(path.resolve()))
+        # Do not resolve away Windows 8.3 aliases in the copyable source path.
+        self.assertEqual(self.app.file_path_var.get(), os.path.abspath(path))
         self.assertEqual(str(self.app.file_path_entry.cget('state')), 'readonly')
 
     def test_long_connection_status_does_not_hide_filename(self):
@@ -68,14 +70,14 @@ class FilenameLayoutTests(unittest.TestCase):
         self.assertGreater(self.app.lbl_file.winfo_width(), 100)
         self.assertEqual(self.app.lbl_file.cget('text'), path.name)
         self.assertIn(path.name, self.root.title())
-        self.assertEqual(self.app.file_path_var.get(), str(path.resolve()))
+        self.assertEqual(self.app.file_path_var.get(), os.path.abspath(path))
         self.assertTrue(self.app.lbl_state.winfo_ismapped())
 
     def test_arabic_filename_uses_visual_header_and_logical_native_title(self):
         path = self.open_file('برنامج التدريب.py')
         self.assertEqual(self.app.lbl_file.cget('text'), controller.to_visual(path.name))
         self.assertEqual(self.root.title(), f'{path.name} — Hyena Control')
-        self.assertEqual(self.app.file_path_entry.get(), str(path.resolve()))
+        self.assertEqual(self.app.file_path_entry.get(), os.path.abspath(path))
 
     def test_editors_have_independent_undo_cursor_and_dirty_flags(self):
         first = self.app._new_document('print(1)\n')

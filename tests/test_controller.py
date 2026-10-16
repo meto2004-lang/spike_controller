@@ -2,6 +2,7 @@
 import asyncio
 import importlib
 from pathlib import Path
+import os
 import sys
 import tempfile
 import threading
@@ -233,7 +234,7 @@ class DocumentTests(unittest.TestCase):
             self.assertTrue(self.app._open_path(str(path)))
         self.app.lbl_file.configure.assert_called_with(text='training.py')
         self.app.root.title.assert_called_with('training.py — Hyena Control')
-        self.app.file_path_var.set.assert_called_with(str(path.resolve()))
+        self.app.file_path_var.set.assert_called_with(os.path.abspath(path))
 
     def test_open_arabic_filename_shapes_header_but_not_title_or_path(self):
         self.box.askyesno.return_value = True
@@ -243,7 +244,7 @@ class DocumentTests(unittest.TestCase):
             self.assertTrue(self.app._open_path(str(path)))
         self.app.lbl_file.configure.assert_called_with(text=controller.to_visual(path.name))
         self.app.root.title.assert_called_with(f'{path.name} — Hyena Control')
-        self.app.file_path_var.set.assert_called_with(str(path.resolve()))
+        self.app.file_path_var.set.assert_called_with(os.path.abspath(path))
 
     def test_saving_as_new_filename_updates_all_document_displays(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -251,7 +252,7 @@ class DocumentTests(unittest.TestCase):
             self.assertTrue(self.app._save_to(str(path)))
         self.app.lbl_file.configure.assert_called_with(text='new-name.py')
         self.app.root.title.assert_called_with('new-name.py — Hyena Control')
-        self.app.file_path_var.set.assert_called_with(str(path.resolve()))
+        self.app.file_path_var.set.assert_called_with(os.path.abspath(path))
 
     def test_dirty_marker_is_shown_in_header_and_window_title(self):
         self.app._set_file_label()
