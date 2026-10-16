@@ -83,6 +83,7 @@ except Exception:
     RTL_OK = False
 
 _AR_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F]")
+ARABIC_PREVIEW_LIMIT = 2000
 
 
 def to_visual(text: str) -> str:
@@ -186,7 +187,13 @@ HELP_TEXT = """\
    Ctrl+L جلسة جديدة ومسح البيانات
    Ctrl+Shift+C نسخ المحدد من الكونسول (أو زر يمين في الكونسول)
 
-7) الكونسول:
+7) العربية داخل الكود:
+   - تعرض لوحة المعاينة السطر الحالي بالعربية دون تغيير مصدر الكود
+   - تتحرك المعاينة مع المؤشر، وزر «معاينة العربية» يخفيها أو يظهرها
+   - «نسخ السطر الأصلي» ينسخ النص الأصلي لا النص المعاد تشكيله
+   - المعاينة للقراءة فقط؛ تحرير العربية في السطر نفسه ما زال محدوداً في Tk
+
+8) الكونسول:
    - حدّد أي نص بالفأرة وانسخه (Ctrl+C أو قائمة يمين)
    - الكونسول قراءة فقط — لا يُمسح بمجرد الضغط على المفاتيح
 """
@@ -316,6 +323,9 @@ class App:
         self._pressed_close = None
         self._sending_path = None
         self._send_op_id = None
+        self._arabic_preview_visible = True
+        self._arabic_preview_state = None
+        self._arabic_preview_source = ""
         self.rx_count = 0
         # نسخة خام من أسطر الكونسول (بلا تحويل العرض) لتستخدمها
         # أدوات التحليل: مولّد السباق وحفظ السجل — حتى لا تتأثر بالترتيب البصري
@@ -541,6 +551,8 @@ class App:
         ttk.Button(document_header, text="+", width=3, command=self.action_new).grid(row=0, column=1)
         ttk.Button(document_header, text=to_visual("إغلاق التبويب"),
                    command=self.action_close_tab).grid(row=0, column=2, padx=4)
+        ttk.Button(document_header, text=to_visual("معاينة العربية"),
+                   command=self._toggle_arabic_preview).grid(row=0, column=3)
         self.file_path_var = tk.StringVar(value="")
         self.file_path_entry = ttk.Entry(ed_frame, textvariable=self.file_path_var,
                                          state="readonly", takefocus=True)
@@ -552,6 +564,7 @@ class App:
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.notebook.bind("<ButtonPress-1>", self._tab_close_press, add="+")
         self.notebook.bind("<ButtonRelease-1>", self._tab_close_release, add="+")
+        self._build_arabic_preview(ed_frame)
         self._new_document()
 
         # كونسول
@@ -597,6 +610,76 @@ class App:
             pass
 
         self._set_file_label()
+
+    # Display-only projection: never reshape text in an editable document.
+    def _build_arabic_preview(self, parent):
+        self.arabic_preview_frame = ttk.Frame(parent)
+        header = ttk.Frame(self.arabic_preview_frame)
+        header.pack(fill="x")
+        header.columnconfigure(0, weight=1)
+        self.arabic_preview_heading = ttk.Label(header, width=1, style="Header.TLabel")
+        self.arabic_preview_heading.grid(row=0, column=0, sticky="ew")
+        ttk.Button(header, text=to_visual("نسخ السطر الأصلي"),
+                   command=self._copy_arabic_preview).grid(row=0, column=1)
+        body = ttk.Frame(self.arabic_preview_frame)
+        body.pack(fill="x")
+        self.arabic_preview = tk.Text(
+            body, height=2, wrap="word", border=0, state="disabled", takefocus=False,
+            exportselection=False, font=("Segoe UI", 11), bg=self.PANEL, fg=self.FG,
+            padx=6, pady=3, cursor="arrow")
+        scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.arabic_preview.yview)
+        self.arabic_preview.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.arabic_preview.pack(side="left", fill="both", expand=True)
+        # Never let the preview export presentation-form characters to code.
+        for sequence in ("<<Copy>>", "<<Cut>>", "<Control-c>", "<Control-x>"):
+            self.arabic_preview.bind(sequence, lambda e: self._copy_arabic_preview())
+        self.arabic_preview.bind("<Button-3>", self._arabic_preview_menu)
+
+    def _arabic_preview_menu(self, event):
+        menu = tk.Menu(self.root, tearoff=0)
+        menu.add_command(label=to_visual("نسخ السطر الأصلي"), command=self._copy_arabic_preview)
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _copy_arabic_preview(self):
+        # Copy the complete logical line, even if the displayed preview is clipped.
+        if self._arabic_preview_source:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._arabic_preview_source)
+        return "break"
+
+    def _toggle_arabic_preview(self):
+        self._arabic_preview_visible = not self._arabic_preview_visible
+        self._arabic_preview_state = None
+        self._update_arabic_preview()
+
+    def _update_arabic_preview(self, document=None):
+        document = document or self.active_document
+        if self._closing or document is not self.active_document or document not in self.documents:
+            return
+        if not self._arabic_preview_visible:
+            self.arabic_preview_frame.pack_forget()
+            return
+        line = document.editor.index("insert").split(".")[0]
+        source = document.editor.get(f"{line}.0", f"{line}.end")
+        state = (document, line, source, RTL_OK)
+        if state == self._arabic_preview_state:
+            return
+        self._arabic_preview_state = state
+        self._arabic_preview_source = source
+        # Pack before the expanding notebook so the preview remains visible.
+        self.arabic_preview_frame.pack(side="bottom", fill="x", pady=(4, 0), before=self.notebook)
+        heading = (to_visual(f"معاينة السطر {line} — للعرض فقط؛ النسخ يعطي السطر الأصلي") if RTL_OK
+                   else f"Line {line}: Arabic preview needs requirements.txt (source unchanged)")
+        self.arabic_preview_heading.configure(text=heading)
+        display = to_visual(source[:ARABIC_PREVIEW_LIMIT])
+        if len(source) > ARABIC_PREVIEW_LIMIT:
+            display += "\n" + to_visual("… المعاينة مختصرة؛ النسخ يشمل السطر كاملًا")
+        self.arabic_preview.configure(state="normal")
+        self.arabic_preview.delete("1.0", "end")
+        self.arabic_preview.insert("1.0", display)
+        self.arabic_preview.configure(state="disabled")
+        self.arabic_preview.yview_moveto(0)
 
     def _ts_var(self):
         if not hasattr(self, "_v_ts"):
@@ -767,6 +850,8 @@ class App:
         editor.edit_modified(False)
         editor.bind("<<Modified>>", lambda e: self._on_editor_modified(e, document))
         editor.bind("<Button-3>", self._editor_menu)
+        for sequence in ("<KeyRelease>", "<ButtonRelease-1>", "<FocusIn>", "<<Selection>>"):
+            editor.bind(sequence, lambda e: self._update_arabic_preview(document), add="+")
         for sequence, action in self._shortcut_bindings().items():
             editor.bind(sequence, lambda e, a=action: self._run_shortcut(a))
         return document
@@ -1721,6 +1806,7 @@ class App:
         self.lbl_file.configure(text=marker + to_visual(document.name))
         self.file_path_var.set(os.path.abspath(document.path) if document.path else "")
         self._update_send_target()
+        self._update_arabic_preview(document)
         if not self._closing:
             self.root.title(f"{marker}{document.name} — Hyena Control")
 

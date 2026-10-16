@@ -33,7 +33,12 @@ def tearDownModule():
 class Editor:
     def __init__(self, text='robot.straight(100)', dirty=True):
         self.text, self.dirty = text, dirty
-    def get(self, *args): return self.text
+    def get(self, *args):
+        if len(args) == 2 and str(args[1]).endswith('.end'):
+            line = int(str(args[0]).split('.')[0])
+            lines = self.text.split('\n')
+            return lines[line - 1] if line <= len(lines) else ''
+        return self.text
     def edit_modified(self, value=None):
         if value is not None: self.dirty = value
         return self.dirty
@@ -42,7 +47,9 @@ class Editor:
     def insert(self, index, value, *tags): self.text += value
     def focus_set(self): pass
     def yview(self): return (0.0, 1.0)
-    def index(self, *args): return f'{len(self.text.splitlines()) + 1}.0'
+    def index(self, *args):
+        if args == ('insert',): return getattr(self, 'cursor', '1.0')
+        return f'{len(self.text.splitlines()) + 1}.0'
     def see(self, *args): pass
     def configure(self, **kwargs): pass
     def yview_moveto(self, *args): pass
@@ -92,6 +99,12 @@ def app_fixture():
     app.lbl_file = MagicMock()
     app.lbl_send_target = MagicMock()
     app.file_path_var = MagicMock()
+    app._arabic_preview_visible = True
+    app._arabic_preview_state = None
+    app._arabic_preview_source = ''
+    app.arabic_preview = Editor('')
+    app.arabic_preview_frame = MagicMock()
+    app.arabic_preview_heading = MagicMock()
     app.lbl_rx = MagicMock()
     app.lbl_state = MagicMock()
     app.lbl_prog = MagicMock()

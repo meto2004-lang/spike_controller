@@ -186,6 +186,56 @@ class FilenameLayoutTests(unittest.TestCase):
         self.assertTrue(self.app.lbl_send_target.winfo_ismapped())
         self.assertGreater(self.app.lbl_send_target.winfo_width(), 700)
 
+    def test_arabic_preview_tracks_cursor_and_keeps_source_undo_and_save_intact(self):
+        source = 'robot.straight(100)  # التدريب قبل السباق\nprint("مرحبا بالعالم")\n'
+        document = self.app._new_document(source)
+        document.editor.mark_set('insert', '1.4')
+        document.editor.event_generate('<<Selection>>')
+        self.root.update()
+        self.assertEqual(self.app.arabic_preview.get('1.0', 'end-1c'),
+                         controller.to_visual(source.splitlines()[0]))
+        document.editor.mark_set('insert', '2.3')
+        document.editor.event_generate('<<Selection>>')
+        self.root.update()
+        self.assertEqual(self.app.arabic_preview.get('1.0', 'end-1c'),
+                         controller.to_visual(source.splitlines()[1]))
+        self.assertEqual(str(self.app.arabic_preview.cget('state')), 'disabled')
+        self.assertFalse(document.dirty)
+        self.assertFalse(document.editor.edit_modified())
+        self.assertEqual(document.editor.get('1.0', 'end-1c'), source)
+        with self.assertRaises(tk.TclError):
+            document.editor.edit_undo()
+        path = self.directory / 'arabic-source.py'
+        self.assertTrue(self.app._save_to(str(path)))
+        self.assertEqual(path.read_bytes(), source.encode('utf-8'))
+
+    def test_preview_copy_exports_logical_line_not_presentation_forms(self):
+        source = 'message = "مرحبا بالعالم"  # تعليق عربي'
+        document = self.app._new_document(source)
+        self.root.update()
+        self.app.arabic_preview.tag_add('sel', '1.0', 'end')
+        self.app.arabic_preview.event_generate('<<Copy>>')
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), source)
+        self.assertFalse(self.app.arabic_preview.cget('exportselection'))
+        self.assertEqual(document.editor.get('1.0', 'end-1c'), source)
+        self.assertFalse(document.dirty)
+
+    def test_preview_toggle_and_tab_switch_restore_correct_source(self):
+        first = self.app._new_document('# التعليق الأول')
+        second = self.app._new_document('# التعليق الثاني')
+        self.root.update()
+        self.assertEqual(self.app._arabic_preview_source, second.editor.get('1.0', 'end-1c'))
+        self.app._toggle_arabic_preview()
+        self.root.update()
+        self.assertFalse(self.app.arabic_preview_frame.winfo_ismapped())
+        self.app._select_document(first)
+        self.app._toggle_arabic_preview()
+        self.root.update()
+        self.assertTrue(self.app.arabic_preview_frame.winfo_ismapped())
+        self.assertGreater(self.app.arabic_preview.winfo_width(), 500)
+        self.assertEqual(self.app._arabic_preview_source, first.editor.get('1.0', 'end-1c'))
+
 
 if __name__ == '__main__':
     unittest.main()
