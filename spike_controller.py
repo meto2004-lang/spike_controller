@@ -20,6 +20,7 @@ Hyena Control — تطبيق التحكم الكامل بروبوت SPIKE Prime 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import queue
@@ -27,13 +28,23 @@ import re
 import sys
 import threading
 import time
+import tempfile
+import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from spike_core import (MAX_LINES, MAX_LINE_BYTES, MAX_HUB_LOG_BYTES,
+                        EventQueue, atomic_write, training_line, validated_config)
+
 # مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(APP_DIR, "spike_controller_config.json")
-LOG_DIR = os.path.join(APP_DIR, "logs")
+# User-writable storage also works when installed under Program Files.
+DATA_DIR = os.environ.get("HYENA_CONTROL_DATA_DIR") or os.path.join(
+    os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_STATE_HOME")
+    or os.path.join(os.path.expanduser("~"), ".local", "state"), "HyenaControl")
+CONFIG_FILE = os.path.join(DATA_DIR, "spike_controller_config.json")
+LEGACY_CONFIG_FILE = os.path.join(APP_DIR, "spike_controller_config.json")
+LOG_DIR = os.path.join(DATA_DIR, "logs")
 
 # عند التشغيل بـ pythonw (start.bat بدون نافذة كونسول) تكون stdout/stderr
 # = None، فيتعطل شريط تقدم الرفع داخل pybricksdev (None.write).
@@ -92,6 +103,7 @@ DEFAULTS = {
     "retries": 6,
     "recent": [],
     "autoconnect": False,
+    "hub_name": "",
 }
 
 SETUP_TEMPLATE = '''\
@@ -153,6 +165,7 @@ HELP_TEXT = """\
    - ⚠ لا تضغط «إرسال وتشغيل» أثناء التدريب — سيمسح التسجيل
 
 4) توليد برنامج سباق:
+   - قبل طباعة تسجيل تدريب جديد اضغط «جلسة جديدة / مسح»
    - بعد استقبال بيانات التدريب اضغط «توليد ملف سباق»
    - يستخرج الأسطر المسجّلة (robot.straight / robot.turn)
    - راجع المعاينة ثم «حفظ كملف» وأرسله للروبوت
@@ -164,7 +177,7 @@ HELP_TEXT = """\
 6) اختصارات:
    F5 إرسال وتشغيل | Ctrl+F5 إرسال مع الانتظار
    Esc إيقاف البرنامج | F1 مساعدة
-   Ctrl+N/O/S فتح/حفظ/جديد | Ctrl+L مسح الكونسول
+   Ctrl+N/O/S جديد/فتح/حفظ | Ctrl+L جلسة جديدة ومسح البيانات
    Ctrl+Shift+C نسخ المحدد من الكونسول (أو زر يمين في الكونسول)
 
 7) الكونسول:
@@ -176,20 +189,10 @@ HELP_TEXT = """\
 # استيراد pybricksdev (اختياري — رسالة خطأ واضحة إن لم يُثبَّت)
 # ---------------------------------------------------------------------------
 try:
-    from bleak import BleakClient
     from pybricksdev.ble import find_device
-    from pybricksdev.ble.pybricks import StatusFlag
     from pybricksdev.connections import ConnectionState
     from pybricksdev.connections.pybricks import PybricksHubBLE, PybricksHubUSB
 
-    # كرت CSR بطيء في اكتشاف GATT — نمدّ مهلة الاتصال الافتراضية
-    _orig_connect = BleakClient.connect
-
-    async def _connect_long(self, *args, **kwargs):
-        kwargs.setdefault("timeout", 60)
-        return await _orig_connect(self, *args, **kwargs)
-
-    BleakClient.connect = _connect_long
     PB_OK = True
     PB_ERR = ""
 except Exception as _e:  # pragma: no cover
@@ -214,57 +217,61 @@ class HubCapture:
         self.out = out
         self.log_file = None
         self.log_path = None
+        self.log_bytes = 0
         self.subs = []
 
-    def handler(self, line) -> None:
-        raw = line if isinstance(line, (bytes, bytearray)) else str(line).encode("utf-8", "replace")
-        try:
-            text = raw.decode("utf-8", "replace")
-        except Exception:
-            text = repr(raw)
-
-        # الروبوت يطلب فتح ملف سجل محلي
-        if b"PB_OF:" in raw or b"_file_begin_ " in raw:
-            start = len(b"PB_OF:") if b"PB_OF:" in raw else len(b"_file_begin_ ")
-            name = raw[start:].decode("utf-8", "replace").strip()
-            safe = os.path.basename(name.replace("\\", "/")) or "hub_log.txt"
-            self.log_path = os.path.join(LOG_DIR, safe)
-            try:
-                self.log_file = open(self.log_path, "w", encoding="utf-8")
-                self.out.put(("console", f"[روبوت] بدأ حفظ سجل: {self.log_path}", "ok"))
-            except Exception as e:
-                self.out.put(("console", f"[روبوت] تعذر فتح ملف السجل: {e}", "err"))
-            return
-
-        if b"PB_EOF" in raw or b"_file_end_" in raw:
-            if self.log_file:
-                try:
-                    self.log_file.close()
-                except Exception:
-                    pass
-                self.log_file = None
-                self.out.put(("console", "[روبوت] انتهى حفظ السجل", "ok"))
-            return
-
-        if self.log_file:
-            self.log_file.write(text + "\n")
-            self.log_file.flush()
-            return
-
-        self.out.put(("console", text, "out"))
-
-    def close(self) -> None:
+    def _close_file(self):
         if self.log_file:
             try:
                 self.log_file.close()
-            except Exception:
-                pass
-            self.log_file = None
-        for s in self.subs:
+            except OSError as exc:
+                self.out.put(("console", f"تعذر إغلاق سجل الروبوت: {exc}", "err"))
+            finally:
+                self.log_file = None
+
+    def handler(self, line) -> None:
+        raw = bytes(line) if isinstance(line, (bytes, bytearray)) else str(line).encode("utf-8", "replace")
+        if len(raw) > MAX_LINE_BYTES:
+            self.out.put(("data_loss", "سطر الروبوت تجاوز الحد المسموح"))
+            return
+        text = raw.decode("utf-8", "replace")
+        prefix = next((p for p in (b"PB_OF:", b"_file_begin_ ") if raw.startswith(p)), None)
+        if prefix:
+            self._close_file()
+            name = raw[len(prefix):].decode("utf-8", "replace").strip()
+            safe = re.sub(r"[^a-zA-Z0-9_-]", "_", os.path.basename(name.replace("\\", "/")))[:48]
             try:
-                s.dispose()
+                fd, self.log_path = tempfile.mkstemp(prefix="hub_" + safe + "_", suffix=".txt", dir=LOG_DIR)
+                self.log_file = os.fdopen(fd, "w", encoding="utf-8")
+                self.log_bytes = 0
+                self.out.put(("console", f"[روبوت] بدأ حفظ سجل: {self.log_path}", "ok"))
+            except OSError as exc:
+                self.out.put(("console", f"تعذر فتح سجل الروبوت: {exc}", "err"))
+            return
+        if raw.strip() in (b"PB_EOF", b"_file_end_"):
+            self._close_file()
+            self.out.put(("console", "[روبوت] انتهى حفظ السجل", "ok"))
+            return
+        if self.log_file:
+            try:
+                size = len((text + "\n").encode("utf-8"))
+                if self.log_bytes + size > MAX_HUB_LOG_BYTES:
+                    raise OSError("تم بلوغ الحد الأقصى لحجم سجل الروبوت")
+                self.log_file.write(text + "\n")
+                self.log_bytes += size
+            except OSError as exc:
+                self._close_file()
+                self.out.put(("console", f"تعذر حفظ سجل الروبوت: {exc}", "err"))
+        # Keep training visible/available even while the hub is sending a file.
+        self.out.put(("console", text, "out"))
+
+    def close(self) -> None:
+        self._close_file()
+        for subscription in self.subs:
+            try:
+                subscription.dispose()
             except Exception:
-                pass
+                traceback.print_exc()
         self.subs = []
 
 
@@ -283,20 +290,34 @@ class App:
         self.root = root
         self.cfg = self._load_config()
 
-        self.queue: "queue.Queue" = queue.Queue()
-        self.hub = None                 # كائن PybricksHubBLE/USB (يُنشئ في خيط BLE)
+        self.queue: "queue.Queue" = EventQueue()
+        self.hub = None                 # UI connection snapshot
+        self._worker_hub = None         # worker-thread connection owner
         self.capture = None
         self.busy = False
+        self._operations = {}  # UI-thread futures, removed only by their own completion
+        self._next_op = 0
+        self._async_tasks = {}  # worker-thread tasks
+        self._op_lock = None
+        self._closing = False
+        self._poll_job = None
         self.connected = False
         self.current_path = None
         self.rx_count = 0
         # نسخة خام من أسطر الكونسول (بلا تحويل العرض) لتستخدمها
         # أدوات التحليل: مولّد السباق وحفظ السجل — حتى لا تتأثر بالترتيب البصري
         self.console_raw: list[str] = []
+        self.training_lines: list[str] = []
+        self.training_overflow = False
+        self.training_revision = 0
+        self._disconnecting_hub = None
+        self._saved_text = STARTER_TEXT
+        self.session_id = 1
         self.session_file = None
         self._hl_job = None
         self.serial_running = False
         self.serial_stop = None
+        self.serial_thread = None
 
         os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -310,7 +331,7 @@ class App:
 
         if not PB_OK:
             self.console(f"تعذر تحميل pybricksdev: {PB_ERR}", "err")
-            self.console("ثبّته بـ: pip install pybricksdev bleak", "info")
+            self.console("ثبّته بـ: python -m pip install -r requirements.txt", "info")
 
         self.console("مرحباً — اضغط «اتصال» بعد تشغيل الروبوت (F1 للمساعدة)", "info")
 
@@ -319,13 +340,13 @@ class App:
 
     # ---------------- إعدادات ----------------
     def _load_config(self) -> dict:
-        cfg = dict(DEFAULTS)
-        try:
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                cfg.update(json.load(f))
-        except Exception:
-            pass
-        return cfg
+        for path in (CONFIG_FILE, LEGACY_CONFIG_FILE):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    return validated_config(json.load(f), DEFAULTS)
+            except (OSError, ValueError):
+                continue
+        return validated_config({}, DEFAULTS)
 
     def _save_config(self) -> None:
         try:
@@ -334,10 +355,9 @@ class App:
                 self.cfg["sash"] = self.paned.sashpos(0)
             except Exception:
                 pass
-            with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.cfg, f, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+            atomic_write(CONFIG_FILE, json.dumps(self.cfg, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            self.console(f"تعذر حفظ الإعدادات: {exc}", "err")
 
     # ---------------- واجهة ----------------
     def _build_style(self) -> None:
@@ -401,8 +421,12 @@ class App:
         self.btn_usb.pack(side="left", padx=2)
         self.btn_serial = ttk.Button(bar, text="بث السلك ▶", command=self.action_serial_toggle)
         self.btn_serial.pack(side="left", padx=2)
+        ttk.Label(bar, text="اسم / عنوان الروبوت:").pack(side="left", padx=(12, 2))
+        self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
+        ttk.Entry(bar, textvariable=self.target_var, width=18).pack(side="left", padx=2)
 
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        bar = ttk.Frame(self.root, padding=(8, 2))
+        bar.pack(side="top", fill="x")
 
         self.btn_send = ttk.Button(bar, text="إرسال وتشغيل ▶", style="Accent.TButton",
                                    command=self.action_send_run)
@@ -418,11 +442,12 @@ class App:
                                    command=self.action_stop)
         self.btn_stop.pack(side="left", padx=2)
 
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+        bar = ttk.Frame(self.root, padding=(8, 2))
+        bar.pack(side="top", fill="x")
 
         self.btn_race = ttk.Button(bar, text="توليد ملف سباق ⚙", command=self.action_race_gen)
         self.btn_race.pack(side="left", padx=2)
-        self.btn_clear = ttk.Button(bar, text="مسح الكونسول", command=self.action_clear_console)
+        self.btn_clear = ttk.Button(bar, text="جلسة جديدة / مسح", command=self.action_clear_console)
         self.btn_clear.pack(side="left", padx=2)
         self.btn_export = ttk.Button(bar, text="تصدير السجل", command=self.action_export_log)
         self.btn_export.pack(side="left", padx=2)
@@ -451,6 +476,9 @@ class App:
         self.editor.configure(yscrollcommand=self._editor_yview)
         self.sb_ed.pack(side="right", fill="y")
         self.editor.pack(side="left", fill="both", expand=True)
+        hscroll = ttk.Scrollbar(ed_frame, orient="horizontal", command=self.editor.xview)
+        self.editor.configure(xscrollcommand=hscroll.set)
+        hscroll.pack(fill="x")
 
         self.editor.insert("1.0", STARTER_TEXT)
         self.editor.edit_reset()
@@ -488,6 +516,8 @@ class App:
 
         # الكونسول: قراءة فقط مع إمكانية التحديد والنسخ + قائمة يمين
         self.console_w.bind("<Key>", self._console_key)
+        for event in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<PasteSelection>>"):
+            self.console_w.bind(event, lambda e: "break")
         self.console_w.bind("<Button-3>", self._console_menu)
         self.editor.bind("<Button-3>", self._editor_menu)
 
@@ -541,6 +571,13 @@ class App:
 
     def _toggle_al(self):
         self.cfg["autolog"] = bool(self._al_var().get())
+        if not self.cfg["autolog"] and self.session_file:
+            try:
+                self.session_file.close()
+            except OSError:
+                traceback.print_exc()
+            finally:
+                self.session_file = None
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self.root)
@@ -593,7 +630,7 @@ class App:
         m_tools = tk.Menu(menubar, tearoff=0)
         m_tools.add_command(label="توليد ملف سباق من المخرجات ⚙",
                             accelerator="Ctrl+G", command=self.action_race_gen)
-        m_tools.add_command(label="مسح الكونسول", accelerator="Ctrl+L",
+        m_tools.add_command(label="جلسة جديدة / مسح الكونسول", accelerator="Ctrl+L",
                             command=self.action_clear_console)
         m_tools.add_command(label="تصدير السجل", command=self.action_export_log)
         menubar.add_cascade(label="أدوات", menu=m_tools)
@@ -643,9 +680,12 @@ class App:
         self.ln.configure(state="disabled")
 
     def _on_editor_modified(self, _event=None) -> None:
+        if self._closing:
+            return
         if self.editor.edit_modified():
             self.editor.edit_modified(False)
             self._update_lineno()
+            self._set_file_label()
             if self._hl_job:
                 self.root.after_cancel(self._hl_job)
             self._hl_job = self.root.after_idle(self._rehighlight)
@@ -677,17 +717,43 @@ class App:
 
     # ---------------- أدوات التحديد والنسخ ----------------
     def _console_key(self, event) -> str | None:
-        """الكونسول قراءة فقط: نسمح بالتنقل والتحديد والنسخ فقط"""
+        """Handle application shortcuts before Tk Text's class bindings."""
+        if self._closing:
+            return "break"
         ctrl = bool(event.state & 0x4)
-        if ctrl and event.keysym.lower() in ("c", "a"):
-            return None  # نسخ / تحديد الكل
-        if ctrl:
-            return "break"  # منع لصق/قص وغيرها
-        if event.keysym in ("Left", "Right", "Up", "Down", "Home", "End",
-                            "Prior", "Next", "Shift_L", "Shift_R",
-                            "Control_L", "Control_R", "Escape"):
+        shift = bool(event.state & 0x1)
+        key = event.keysym.lower()
+        action = None
+        if key == "escape":
+            action = self.action_stop
+        elif key == "f1":
+            action = self.action_help
+        elif key == "f5":
+            action = self.action_send_wait if ctrl else self.action_send_run
+        elif ctrl:
+            if key == "c":
+                if shift:
+                    self._copy_console()
+                    return "break"
+                return None  # native copy; no application shortcut needed
+            if key == "a":
+                self._select_all_console()
+                return "break"
+            action_name = {
+                "n": "action_new", "o": "action_open",
+                "s": "action_save_as" if shift else "action_save",
+                "g": "action_race_gen", "l": "action_clear_console",
+            }.get(key)
+            if action_name:
+                action = getattr(self, action_name)
+        if action:
+            action()
+            return "break"  # do not execute the same shortcut again via bind_all
+        if not ctrl and event.keysym in (
+                "Left", "Right", "Up", "Down", "Home", "End", "Prior", "Next",
+                "Shift_L", "Shift_R", "Control_L", "Control_R"):
             return None
-        return "break"  # منع أي كتابة أو حذف
+        return "break"
 
     def _copy_console(self) -> None:
         sel = self.console_w.tag_ranges("sel")
@@ -713,7 +779,7 @@ class App:
         m = tk.Menu(self.root, tearoff=0)
         self._popup_copy_items(m, self.console_w)
         m.add_separator()
-        m.add_command(label="مسح الكونسول", command=self.action_clear_console)
+        m.add_command(label="جلسة جديدة / مسح الكونسول", command=self.action_clear_console)
         m.add_command(label="تصدير السجل", command=self.action_export_log)
         m.tk_popup(event.x_root, event.y_root)
 
@@ -730,55 +796,107 @@ class App:
         m.tk_popup(event.x_root, event.y_root)
 
     # ---------------- الكونسول ----------------
-    def console(self, text: str, tag: str = "out") -> None:
+    def console(self, text: str, tag: str = "out", source: str = "ble") -> None:
         w = self.console_w
         line = text.rstrip("\n")
-        self.console_raw.append((ts() + " " + line) if self._ts_var().get() else line)
-        if len(self.console_raw) > 20000:
+        if len(line.encode("utf-8")) > MAX_LINE_BYTES:
+            self.training_overflow = True
+            line = "سطر طويل جداً — لن يُستخدم في توليد السباق"
+            tag = "err"
+        if tag == "out":
+            self.training_revision += 1
+            for raw_line in line.splitlines():
+                if len(self.training_lines) < MAX_LINES:
+                    self.training_lines.append(raw_line)
+                else:
+                    self.training_overflow = True
+        display = ("[سلك] " if source == "serial" else "") + line
+        stamp = ts()
+        self.console_raw.append((stamp + " " + display) if self._ts_var().get() else display)
+        if len(self.console_raw) > MAX_LINES:
             del self.console_raw[:5000]
+        at_end = w.yview()[1] >= 0.99
         if self._ts_var().get():
-            w.insert("end", ts() + " ", "ts")
-        w.insert("end", to_visual(line) + "\n", tag)
-        w.see("end")
+            w.insert("end", stamp + " ", "ts")
+        # Shape the Arabic source label separately: applying RTL to the whole
+        # line can move Python parentheses ahead of the command.
+        visual_prefix = to_visual("[سلك]") + " " if source == "serial" else ""
+        rendered = visual_prefix + "\n".join(to_visual(part) for part in line.split("\n"))
+        w.insert("end", rendered + "\n", tag)
+        if int(w.index("end-1c").split(".")[0]) > MAX_LINES:
+            w.delete("1.0", "5001.0")
+        if at_end:
+            w.see("end")
         self.rx_count += 1
         self.lbl_rx.configure(text=f"{self.rx_count} سطر")
         if self._al_var().get():
             try:
                 if self.session_file is None:
-                    self.session_file = open(
-                        os.path.join(LOG_DIR, "session_" +
-                                     time.strftime("%Y%m%d_%H%M%S") + ".txt"),
-                        "a", encoding="utf-8")
-                self.session_file.write(f"{ts()} {text.rstrip()}\n")
-                self.session_file.flush()
-            except Exception:
-                pass
+                    fd, path = tempfile.mkstemp(prefix="session_" + time.strftime("%Y%m%d_%H%M%S") + "_",
+                                                suffix=".txt", dir=LOG_DIR)
+                    self.session_file = os.fdopen(fd, "w", encoding="utf-8")
+                    self._session_flush = time.monotonic()
+                self.session_file.write(f"{stamp} {display}\n")
+                if time.monotonic() - self._session_flush >= 1:
+                    self.session_file.flush()
+                    self._session_flush = time.monotonic()
+            except OSError as exc:
+                # Do not recursively call console when its own storage fails.
+                traceback.print_exc()
+                self._al_var().set(False)
+                self._toggle_al()
+                messagebox.showerror("حفظ السجل", f"تم تعطيل الحفظ التلقائي: {exc}")
 
     # ---------------- حلقة الرسائل من خيط BLE ----------------
     def _poll(self) -> None:
+        if self._closing:
+            return
         try:
-            while True:
-                msg = self.queue.get_nowait()
-                self._handle_msg(msg)
-        except queue.Empty:
-            pass
-        self.root.after(80, self._poll)
+            dropped = self.queue.take_dropped()
+            if dropped:
+                self.training_overflow = True
+                self.console(f"فقد {dropped} سطر بسبب كثافة الاستقبال؛ ابدأ جلسة جديدة قبل توليد سباق", "err")
+            deadline = time.monotonic() + 0.015
+            for _ in range(200):
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    msg = self.queue.get_nowait()
+                except queue.Empty:
+                    break
+                try:
+                    self._handle_msg(msg)
+                except Exception:
+                    traceback.print_exc()
+                    self.training_overflow = True
+                finally:
+                    self.queue.task_done()
+        finally:
+            if not self._closing:
+                self._poll_job = self.root.after(80, self._poll)
 
     def _handle_msg(self, msg) -> None:
         kind = msg[0]
         if kind == "console":
-            _, text, tag = msg
-            self.console(text, tag)
+            _, text, tag, *source = msg
+            self.console(text, tag, source=source[0] if source else "ble")
         elif kind == "hub_state":
-            if msg[1] == "disconnected" and self.connected:
+            if msg[1] == "disconnected" and msg[2] is self.hub:
+                expected = len(msg) > 3 and msg[3]
                 self.connected = False
                 self.hub = None
-                self.capture = None
-                self.console("انقطع الاتصال بالروبوت!", "err")
+                if not expected:
+                    self.training_overflow = True
+                    self.console("انقطع الاتصال بالروبوت! تحقق من اكتمال التدريب وابدأ جلسة جديدة.", "err")
                 self.lbl_state.configure(text="● غير متصل", foreground=self.ERR)
                 self.lbl_prog.configure(text="")
                 self._refresh_buttons()
+        elif kind == "data_loss":
+            self.training_overflow = True
+            self.console(msg[1], "err")
         elif kind == "hub_status":
+            if msg[2] is not self.hub:
+                return
             flags = msg[1]
             parts = []
             parts.append("● البرنامج يعمل" if flags & FLAG_USER_RUN else "○ البرنامج متوقف")
@@ -786,12 +904,18 @@ class App:
                 parts.append("⚠ البطارية منخفضة!")
             self.lbl_prog.configure(text="   ".join(parts))
         elif kind == "serial_state":
+            if msg[2] is not self.serial_stop:
+                return
             self.serial_running = bool(msg[1])
             self.btn_serial.configure(
                 text="بث السلك ■" if self.serial_running else "بث السلك ▶")
         elif kind in ("op_done", "op_error"):
-            _, name, res, err = msg
-            self.busy = False
+            _, op_id, name, res, err = msg
+            self._operations.pop(op_id, None)
+            self.busy = bool(self._operations)
+            if name in ("connect", "usb_connect") and err is None and res is not self._worker_hub:
+                self._refresh_buttons()
+                return
             if name == "connect" and err is None and res is not None:
                 self.hub = res
                 self.connected = True
@@ -809,15 +933,18 @@ class App:
                     text=f"● متصل بالسلك: {getattr(res, '_app_label', 'USB')} "
                          f"(فرموير {res.fw_version})",
                     foreground=self.OK)
-            if name == "disconnect":
-                if self.capture:
-                    self.capture.close()
+            if name == "disconnect" and (err is None or self._worker_hub is None):
                 self.hub = None
                 self.connected = False
                 self.capture = None
                 self.lbl_state.configure(text="● غير متصل", foreground=self.ERR)
                 self.lbl_prog.configure(text="")
-            if err is not None:
+            if name in ("connect", "usb_connect") and err is None and res is not None:
+                flags = getattr(getattr(res, "status_observable", None), "value", 0)
+                self._handle_msg(("hub_status", int(flags), res))
+            if isinstance(err, concurrent.futures.CancelledError):
+                self.console(f"تم إلغاء العملية: {name}", "info")
+            elif err is not None:
                 self.console(f"خطأ في «{name}»: {type(err).__name__}: {err}", "err")
                 if self.connected:
                     self.lbl_state.configure(text=f"● متصل (حدث خطأ في {name})",
@@ -829,11 +956,11 @@ class App:
         self.queue.put(("console", text, tag))
 
     def _hub_or_raise(self):
-        if self.hub is None:
+        if self._worker_hub is None:
             raise RuntimeError("غير متصل بالروبوت — اضغط «اتصال» أولاً")
-        return self.hub
+        return self._worker_hub
 
-    async def op_connect(self):
+    async def op_connect(self, target=None):
         if not PB_OK:
             raise RuntimeError(f"pybricksdev غير متوفر: {PB_ERR}")
         scan = int(self.cfg.get("scan_timeout", 20))
@@ -841,23 +968,32 @@ class App:
         for attempt in range(1, retries + 1):
             self._say(f"المحاولة {attempt}/{retries} — جاري البحث عن الروبوت...")
             try:
-                dev = await find_device(None, timeout=scan)
+                dev = await find_device(target or None, timeout=scan)
             except asyncio.TimeoutError:
                 self._say("لم يُعثر على الروبوت — تأكد أنه مضاء ويرمش أزرق", "err")
                 continue
             hub = PybricksHubBLE(dev)
             try:
-                await hub.connect()
+                await asyncio.wait_for(hub.connect(), timeout=60)
+            except asyncio.CancelledError:
+                await asyncio.wait_for(hub.disconnect(), timeout=5)
+                raise
             except Exception as e:
                 self._say(f"فشل الاتصال: {type(e).__name__}: {e}", "err")
                 try:
-                    await hub.disconnect()
+                    await asyncio.wait_for(hub.disconnect(), timeout=5)
                 except Exception:
                     pass
                 continue
             self._say(f"تم الاتصال بـ {dev.name} — الفرموير {hub.fw_version}", "ok")
             hub._app_label = str(dev.name)
-            self._install_capture(hub)
+            self._worker_hub = hub
+            try:
+                self._install_capture(hub)
+            except BaseException:
+                await asyncio.wait_for(hub.disconnect(), timeout=5)
+                self._worker_hub = None
+                raise
             return hub
         raise RuntimeError(f"لم يتم الاتصال بعد {retries} محاولات")
 
@@ -886,8 +1022,8 @@ class App:
             cfgs = dev.configurations()
             if cfgs:
                 classes = [i.bInterfaceClass for i in cfgs[0]]
-        except Exception:
-            pass
+        except Exception as exc:
+            raise RuntimeError("تعذر قراءة واجهات USB؛ تحقق من التعريفات والصلاحيات") from exc
         self._say("كابل USB مكتشف — الواجهات: " +
                   (", ".join(hex(c) for c in classes) if classes else "؟"), "info")
 
@@ -899,10 +1035,23 @@ class App:
 
         # واجهة Pybricks موجودة ← مسار كامل ممكن
         hub = PybricksHubUSB(dev)
-        await hub.connect()
+        try:
+            await asyncio.wait_for(hub.connect(), timeout=60)
+        except BaseException:
+            try:
+                await asyncio.wait_for(hub.disconnect(), timeout=5)
+            except Exception:
+                traceback.print_exc()
+            raise
+        self._worker_hub = hub
         hub._app_label = "USB سلك"
         self._say(f"اتصال سلك ناجح! {getattr(hub, '_hub_name', '')} — الفرموير {hub.fw_version}", "ok")
-        self._install_capture(hub)
+        try:
+            self._install_capture(hub)
+        except BaseException:
+            await asyncio.wait_for(hub.disconnect(), timeout=5)
+            self._worker_hub = None
+            raise
         return hub
 
     def _install_capture(self, hub) -> None:
@@ -914,21 +1063,25 @@ class App:
         def on_state(state):
             try:
                 if state == ConnectionState.DISCONNECTED:
-                    self.queue.put(("hub_state", "disconnected"))
+                    cap.close()
+                    if self._worker_hub is hub:
+                        self._worker_hub = None
+                    self.queue.put(("hub_state", "disconnected", hub, self._disconnecting_hub is hub))
             except Exception:
-                pass
+                traceback.print_exc()
 
         def on_status(flags):
             try:
-                self.queue.put(("hub_status", int(flags)))
+                self.queue.put(("hub_status", int(flags), hub))
             except Exception:
-                pass
+                traceback.print_exc()
 
         try:
             cap.subs.append(hub.connection_state_observable.subscribe(on_state))
             cap.subs.append(hub.status_observable.subscribe(on_status))
         except Exception:
-            pass
+            cap.close()
+            raise
         self.capture = cap
 
     async def _quiet_stop(self, hub) -> None:
@@ -936,7 +1089,7 @@ class App:
             await hub.stop_user_program()
             await asyncio.sleep(0.5)
         except Exception as e:
-            self._say(f"(إيقاف البرنامج السابق تم تخطيه: {type(e).__name__})", "info")
+            raise RuntimeError("تعذر إيقاف البرنامج السابق؛ أُلغي الإرسال حفاظاً على سلامة الروبوت") from e
 
     async def op_send_run(self, path, wait):
         hub = self._hub_or_raise()
@@ -963,41 +1116,80 @@ class App:
         self._say("تم تشغيل البرنامج المخزن ✔", "ok")
 
     async def op_stop(self):
-        hub = self._hub_or_raise()
+        hub = self._worker_hub
+        if hub is None:
+            return
         await hub.stop_user_program()
         self._say("تم إيقاف البرنامج ✔", "ok")
 
     async def op_disconnect(self):
-        hub = self.hub
-        if hub is None:
-            return
-        try:
-            await hub.disconnect()
-        except Exception as e:
-            self._say(f"(قطع الاتصال: {type(e).__name__})", "info")
+        hub = self._worker_hub
+        if hub is not None:
+            # Keep ownership after failure so the user can retry disconnecting.
+            self._disconnecting_hub = hub
+            try:
+                await asyncio.wait_for(hub.disconnect(), timeout=5)
+            finally:
+                self._disconnecting_hub = None
+        self._worker_hub = None
+        if self.capture:
+            self.capture.close()
+            self.capture = None
         self._say("تم قطع الاتصال", "info")
 
-    # ---------------- إرسال الأوامر من الواجهة ----------------
-    def _start_op(self, name, coro, allow_busy=False):
+    # Each operation owns a task; interrupts await cancellation BEFORE stopping.
+    async def _execute_op(self, op_id, factory, interrupt=False):
+        task = asyncio.current_task()
+        self._async_tasks[op_id] = task
+        try:
+            if interrupt:
+                others = [t for key, t in self._async_tasks.items() if key != op_id]
+                for other in others:
+                    other.cancel()
+                if others:
+                    await asyncio.gather(*others, return_exceptions=True)
+            if self._op_lock is None:
+                self._op_lock = asyncio.Lock()
+            async with self._op_lock:
+                return await factory()
+        finally:
+            self._async_tasks.pop(op_id, None)
+
+    def _start_op(self, name, factory, allow_busy=False):
+        if self._closing:
+            return False
         if not PB_OK:
             self.console(f"غير جاهز: {PB_ERR}", "err")
-            return
-        if self.busy and not allow_busy:
-            self.console("أكمل العملية الحالية أولاً (أو اضغط Esc للإيقاف)", "info")
-            return
-        if not self.busy:
-            self.busy = True
-            self._refresh_buttons()
-        fut = asyncio.run_coroutine_threadsafe(coro, _WORKER.loop)
+            return False
+        if not _WORKER.loop.is_running():
+            self.console("عامل الاتصال غير متاح؛ أعد تشغيل التطبيق", "err")
+            return False
+        if (self.busy and not allow_busy) or any(
+                entry[0] in ("stop", "disconnect") for entry in self._operations.values()):
+            self.console("أكمل العملية الحالية أولاً (Esc يلغي العملية ويوقف البرنامج)", "info")
+            return False
+        self._next_op += 1
+        op_id = self._next_op
+        self._operations[op_id] = (name, None)
+        self.busy = True
+        self._refresh_buttons()
+        coro = self._execute_op(op_id, factory, interrupt=allow_busy)
+        try:
+            fut = asyncio.run_coroutine_threadsafe(coro, _WORKER.loop)
+        except Exception as exc:
+            coro.close()
+            self.queue.put(("op_error", op_id, name, None, exc))
+            return False
+        self._operations[op_id] = (name, fut)
 
         def _done(f):
             try:
                 res = f.result()
-                self.queue.put(("op_done", name, res, None))
-            except Exception as e:
-                self.queue.put(("op_error", name, None, e))
-
+                self.queue.put(("op_done", op_id, name, res, None))
+            except Exception as exc:
+                self.queue.put(("op_error", op_id, name, None, exc))
         fut.add_done_callback(_done)
+        return True
 
     def _refresh_buttons(self) -> None:
         c = self.connected and self.hub is not None
@@ -1010,39 +1202,57 @@ class App:
         self.btn_sendwait.configure(state=st_send)
         self.btn_dl.configure(state=st_send)
         self.btn_stored.configure(state=st_send)
-        self.btn_stop.configure(state="normal" if c else "disabled")
+        self.btn_stop.configure(state="normal" if (c or b) else "disabled")
 
     # ---------------- أفعال الواجهة ----------------
     def action_connect(self):
+        if self._closing or self.busy or self.connected:
+            return
+        target = self.target_var.get().strip()
+        if len(target) > 128 or any(ord(c) < 32 for c in target):
+            messagebox.showerror("اسم الروبوت", "اسم أو عنوان الروبوت غير صالح")
+            return
+        if not target and not messagebox.askyesno(
+                "اختيار الروبوت", "لم تحدد اسماً أو عنواناً. هل تريد الاتصال بأول روبوت متاح؟",
+                default="no"):
+            return
+        self.cfg["hub_name"] = target
         self.console("جاري الاتصال بالروبوت...", "info")
-        self._start_op("connect", self.op_connect())
+        self._start_op("connect", lambda: self.op_connect(target))
 
     def action_disconnect(self):
-        self._start_op("disconnect", self.op_disconnect(), allow_busy=True)
+        self._start_op("disconnect", self.op_disconnect, allow_busy=True)
 
     def action_usb_connect(self):
         if self.connected and self.hub is not None:
             self.console("اقطع الاتصال الحالي أولاً", "info")
             return
         self.console("جاري فحص كابل USB والاتصال بالسلك...", "info")
-        self._start_op("usb_connect", self.op_connect_usb())
+        self._start_op("usb_connect", self.op_connect_usb)
 
     # ---------------- بث السلك (استقبال من COM) ----------------
     def action_serial_toggle(self):
+        if self._closing:
+            return
         if self.serial_running:
-            if self.serial_stop:
-                self.serial_stop.set()
+            self.serial_stop.set()
             self.console("إيقاف بث السلك...", "info")
             return
         port = self._find_hub_port()
         if not port:
-            self.console("لا يوجد منفذ سلك للروبوت — وصّل كابل USB أولاً", "err")
+            self.console("لا يوجد منفذ سلك للروبوت — وصّل الكابل وتأكد من تثبيت pyserial", "err")
             return
-        self.serial_stop = threading.Event()
-        t = threading.Thread(target=self._serial_reader, args=(port,),
-                             name="serial-reader", daemon=True)
-        t.start()
-        self.console(f"فتح {port} — بانتظار بيانات الروبوت عبر السلك...", "info")
+        stop = self.serial_stop = threading.Event()
+        self.serial_running = True  # reserve before starting; a second click stops it
+        self.btn_serial.configure(text="بث السلك ■")
+        self.serial_thread = threading.Thread(target=self._serial_reader, args=(port, stop),
+                                              name="serial-reader", daemon=True)
+        try:
+            self.serial_thread.start()
+        except RuntimeError as exc:
+            self.serial_running = False
+            self.btn_serial.configure(text="بث السلك ▶")
+            self.console(f"تعذر بدء قارئ السلك: {exc}", "err")
 
     def _find_hub_port(self):
         try:
@@ -1054,46 +1264,54 @@ class App:
             pass
         return None
 
-    def _serial_reader(self, port: str) -> None:
+    def _serial_reader(self, port: str, stop: threading.Event) -> None:
+        s = None
+        buf = b""
+        discarding = False
         try:
             import serial as ser
             s = ser.Serial(port, 115200, timeout=0.5)
-        except Exception as e:
-            self.queue.put(("console", f"تعذر فتح {port}: {e}", "err"))
-            self.queue.put(("serial_state", False))
-            return
-        buf = b""
-        got_any = False
-        try:
-            while not self.serial_stop.is_set():
+            self.queue.put(("serial_state", True, stop))
+            self.queue.put(("console", f"تم فتح {port} — بانتظار بيانات الروبوت", "info"))
+            while not stop.is_set():
                 data = s.read(256)
-                if data:
-                    got_any = True
-                    buf += data
-                    while b"\n" in buf:
-                        line, buf = buf.split(b"\n", 1)
+                if not data:
+                    continue
+                if discarding:
+                    if b"\n" not in data:
+                        continue
+                    data = data.split(b"\n", 1)[1]
+                    discarding = False
+                buf += data
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    if len(line) > MAX_LINE_BYTES:
+                        self.queue.put(("data_loss", "سطر السلك طويل جداً؛ ابدأ جلسة جديدة"))
+                    else:
                         text = line.decode("utf-8", "replace").rstrip("\r")
                         if text:
-                            self.queue.put(("console", "[سلك] " + text, "out"))
+                            self.queue.put(("console", text, "out", "serial"))
+                if len(buf) > MAX_LINE_BYTES:
+                    buf = b""
+                    discarding = True
+                    self.queue.put(("data_loss", "تجاوز مخزن السلك الحد المسموح؛ ابدأ جلسة جديدة"))
+        except Exception as exc:
+            self.queue.put(("console", f"خطأ في بث {port}: {exc}", "err"))
+            self.queue.put(("data_loss", "انقطع بث السلك؛ تحقق من اكتمال بيانات التدريب"))
         finally:
-            try:
-                s.close()
-            except Exception:
-                pass
-            if not got_any:
-                self.queue.put(("console",
-                                "[سلك] أُغلق المنفذ — لم تصل بيانات (قد لا يبث الفرموير على السلك)",
-                                "info"))
-            self.queue.put(("serial_state", False))
+            if buf and not discarding:
+                self.queue.put(("console", buf.decode("utf-8", "replace").rstrip("\r"), "out", "serial"))
+            if s is not None:
+                try:
+                    s.close()
+                except Exception as exc:
+                    self.queue.put(("console", f"تعذر إغلاق {port}: {exc}", "err"))
+            self.queue.put(("serial_state", False, stop))
 
     def _require_saved_file(self) -> str | None:
-        if not self.current_path:
-            self.console("احفظ الملف أولاً (Ctrl+S)", "info")
-            self.action_save()
-        if self.current_path and not self.editor.edit_modified():
-            return self.current_path
-        if self.current_path:
-            self.action_save()
+        if not self.current_path or self._editor_dirty():
+            if not self.action_save():
+                return None
         return self.current_path
 
     def action_send_run(self):
@@ -1101,31 +1319,32 @@ class App:
         if not path:
             return
         self.console(f"إرسال وتشغيل: {os.path.basename(path)}", "info")
-        self._start_op("send_run", self.op_send_run(path, wait=False))
+        self._start_op("send_run", lambda: self.op_send_run(path, wait=False))
 
     def action_send_wait(self):
         path = self._require_saved_file()
         if not path:
             return
         self.console(f"إرسال مع الانتظار: {os.path.basename(path)}", "info")
-        self._start_op("send_wait", self.op_send_run(path, wait=True))
+        self._start_op("send_wait", lambda: self.op_send_run(path, wait=True))
 
     def action_download_only(self):
         path = self._require_saved_file()
         if not path:
             return
-        self._start_op("download", self.op_download_only(path))
+        self._start_op("download", lambda: self.op_download_only(path))
 
     def action_run_stored(self):
-        self._start_op("run_stored", self.op_run_stored())
+        self._start_op("run_stored", self.op_run_stored)
 
     def action_stop(self):
-        if self.connected and self.hub is not None:
-            self._start_op("stop", self.op_stop(), allow_busy=True)
+        if self.busy or self.connected:
+            self._start_op("stop", self.op_stop, allow_busy=True)
 
     # ---------------- الملفات ----------------
     def _editor_dirty(self) -> bool:
-        return bool(self.editor.get("1.0", "end-1c").strip()) and self.editor.edit_modified()
+        # Tk's modified flag is reset for event delivery, not document state.
+        return self.editor.get("1.0", "end-1c") != self._saved_text
 
     def _confirm_discard(self) -> bool:
         if not self._editor_dirty():
@@ -1139,21 +1358,23 @@ class App:
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", STARTER_TEXT)
         self.editor.edit_reset()
+        self.editor.edit_modified(False)
+        self._saved_text = STARTER_TEXT
         self.current_path = None
         self._set_file_label()
 
     def action_open(self):
-        if not self._confirm_discard():
-            return
         p = filedialog.askopenfilename(
             title="فتح ملف بايثون",
             filetypes=[("ملفات بايثون", "*.py"), ("الكل", "*.*")],
-            initialdir=os.path.dirname(self.current_path or APP_DIR))
+            initialdir=(os.path.dirname(self.current_path) if self.current_path else APP_DIR))
         if not p:
             return
         self._open_path(p)
 
     def _open_path(self, p):
+        if not self._confirm_discard():
+            return False
         try:
             with open(p, "r", encoding="utf-8") as f:
                 text = f.read()
@@ -1163,43 +1384,47 @@ class App:
         self.editor.delete("1.0", "end")
         self.editor.insert("1.0", text)
         self.editor.edit_reset()
+        self.editor.edit_modified(False)
+        self._saved_text = text
         self.current_path = p
         self._add_recent(p)
         self._set_file_label()
         self.console(f"فُتح: {p}", "ok")
+        return True
 
     def action_save(self):
         if not self.current_path:
-            self.action_save_as()
-            return
-        self._save_to(self.current_path)
+            return self.action_save_as()
+        return self._save_to(self.current_path)
 
     def action_save_as(self):
         p = filedialog.asksaveasfilename(
             title="حفظ باسم", defaultextension=".py",
             filetypes=[("ملفات بايثون", "*.py")],
-            initialdir=os.path.dirname(self.current_path or APP_DIR),
+            initialdir=(os.path.dirname(self.current_path) if self.current_path else APP_DIR),
             initialfile=os.path.basename(self.current_path or "program.py"))
         if not p:
-            return
-        self._save_to(p)
+            return False
+        return self._save_to(p)
 
     def _save_to(self, p):
         try:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(self.editor.get("1.0", "end-1c"))
+            text = self.editor.get("1.0", "end-1c")
+            atomic_write(p, text)
         except Exception as e:
             messagebox.showerror("خطأ", f"تعذر الحفظ:\n{e}")
-            return
+            return False
+        self._saved_text = text
         self.editor.edit_modified(False)
         self.current_path = p
         self._add_recent(p)
         self._set_file_label()
         self.console(f"حُفظ: {p}", "ok")
+        return True
 
     def _set_file_label(self):
         name = os.path.basename(self.current_path) if self.current_path else "ملف جديد"
-        self.lbl_file.configure(text=name)
+        self.lbl_file.configure(text=("* " if self._editor_dirty() else "") + name)
 
     def _add_recent(self, p):
         recent = [x for x in self.cfg.get("recent", []) if x != p]
@@ -1228,7 +1453,17 @@ class App:
 
     # ---------------- أدوات ----------------
     def action_clear_console(self):
+        if self.training_lines and not messagebox.askyesno(
+                "جلسة تدريب جديدة", "سيتم مسح بيانات التدريب الحالية من الذاكرة. متابعة؟"):
+            return
+        self.queue.discard_console()
         self.console_w.delete("1.0", "end")
+        self.console_raw.clear()
+        self.training_lines.clear()
+        self.training_overflow = False
+        self.rx_count = 0
+        self.session_id += 1
+        self.lbl_rx.configure(text="0 سطر")
 
     def action_export_log(self):
         p = filedialog.asksaveasfilename(
@@ -1239,11 +1474,16 @@ class App:
         if not p:
             return
         try:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write("\n".join(self.console_raw))
+            atomic_write(p, "\n".join(self.console_raw))
             self.console(f"صُدّر السجل: {p}", "ok")
         except Exception as e:
             messagebox.showerror("خطأ", f"تعذر التصدير:\n{e}")
+
+    def _training_snapshot(self):
+        revision, pending, lost = self.queue.training_status()
+        if self.training_overflow or pending or lost or self._closing:
+            return None
+        return self.session_id, self.training_revision, revision
 
     def action_race_gen(self):
         RaceGenWindow(self)
@@ -1267,28 +1507,62 @@ class App:
         self.editor.focus_set()
 
     # ---------------- الإغلاق ----------------
+    async def _shutdown(self):
+        tasks = list(self._async_tasks.values())
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        try:
+            await self.op_disconnect()
+        finally:
+            if self.capture:
+                self.capture.close()
+                self.capture = None
+
     def _on_close(self):
-        if self._editor_dirty():
-            if not messagebox.askyesno("خروج", "تعديلات غير محفوظة — الخروج بدون حفظ؟"):
-                return
+        if self._closing or not self._confirm_discard():
+            return
         self._save_config()
+        self._closing = True
+        self.editor.configure(state="disabled")
+        if self._poll_job:
+            self.root.after_cancel(self._poll_job)
+        if self._hl_job:
+            self.root.after_cancel(self._hl_job)
         if self.serial_stop:
             self.serial_stop.set()
+        self.root.title("Hyena Control — جاري إغلاق الاتصال...")
+        if _WORKER.loop.is_running():
+            self._shutdown_future = asyncio.run_coroutine_threadsafe(self._shutdown(), _WORKER.loop)
+        else:
+            self._shutdown_future = None
+        self._close_started = time.monotonic()
+        self._finish_close()
+
+    def _finish_close(self):
+        future = self._shutdown_future
+        serial_alive = self.serial_thread is not None and self.serial_thread.is_alive()
+        if (future is not None and not future.done()) or serial_alive:
+            if time.monotonic() - self._close_started > 10:
+                # Don't silently kill a connection whose cleanup may still be active.
+                self.root.title("Hyena Control — انتظار إغلاق الاتصال؛ تحقق من الكابل")
+            self.root.after(50, self._finish_close)
+            return
+        if future is not None:
+            try:
+                future.result()
+            except Exception:
+                traceback.print_exc()
         if self.session_file:
             try:
                 self.session_file.close()
-            except Exception:
-                pass
-        if self.connected and self.hub is not None:
-            try:
-                asyncio.run_coroutine_threadsafe(self.op_disconnect(), _WORKER.loop)
-                time.sleep(1.2)
-            except Exception:
-                pass
-        try:
+            except OSError:
+                traceback.print_exc()
+        if _WORKER.loop.is_running():
             _WORKER.loop.call_soon_threadsafe(_WORKER.loop.stop)
-        except Exception:
-            pass
+        else:
+            _WORKER.loop.close()
         self.root.destroy()
 
 
@@ -1314,6 +1588,9 @@ class RaceGenWindow:
         self.preview.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         self.preview.pack(side="left", fill="both", expand=True)
+        hscroll = ttk.Scrollbar(self.win, orient="horizontal", command=self.preview.xview)
+        self.preview.configure(xscrollcommand=hscroll.set)
+        hscroll.pack(fill="x", padx=10)
 
         bar = ttk.Frame(self.win, padding=10)
         bar.pack(fill="x")
@@ -1325,51 +1602,79 @@ class RaceGenWindow:
         self.refresh()
 
     def refresh(self):
-        # نستخدم النسخة الخام من الأسطر (لا المعرضة) حتى تبقى
-        # التعليقات العربية وعلامات # في صيغتها الأصلية للتحليل
-        console_text = "\n".join(self.app.console_raw)
+        snapshot = self.app._training_snapshot()
+        if snapshot is None:
+            self.preview.delete("1.0", "end")
+            messagebox.showerror("بيانات غير مكتملة", "انتظر اكتمال الاستقبال ومعالجة الرسائل. عند فقد بيانات ابدأ جلسة جديدة وأعد استقبال التدريب كاملاً.")
+            return
         kept = []
-        for line in console_text.splitlines():
-            # إزالة الطابع الزمني إن وُجد (مثل 10:22:33)
-            s = re.sub(r"^\d{2}:\d{2}:\d{2}\s+", "", line.strip())
-            # أوامر الحركة المسجّلة
-            if re.match(r"^robot\.(straight|turn|stop|straight_time|drive)\b", s):
-                kept.append(s)
-            # تعليقات قراءات الحساسات
-            elif s.startswith("#") and ("sensor" in s or "حساس" in s):
-                kept.append(s)
+        errors = []
+        for number, line in enumerate(self.app.training_lines, 1):
+            try:
+                command = training_line(line)
+                if command is not None:
+                    kept.append(command)
+            except ValueError as exc:
+                errors.append(f"السطر {number}: {exc}")
+        if errors:
+            self.preview.delete("1.0", "end")
+            messagebox.showerror("أوامر تدريب مرفوضة", "\n".join(errors[:10]))
+            return
         if not kept:
-            kept = ["# (لا توجد بيانات تدريب في الكونسول — درّب الروبوت أولاً)"]
+            kept = ["# (لا توجد بيانات تدريب في الجلسة الحالية)"]
 
         head = SETUP_TEMPLATE.split("# --- بداية المسار ---")[0] + \
             "# --- بداية المسار ---\nhub.light.on(Color.GREEN)\n\n"
         tail = "\n# --- نهاية المسار ---\nrobot.stop()\n" \
                "hub.light.on(Color.BLUE)\nhub.speaker.beep(900, 200)\n"
+        if snapshot != self.app._training_snapshot():
+            self.preview.delete("1.0", "end")
+            messagebox.showerror("تغيرت البيانات", "وصلت بيانات جديدة أثناء التوليد؛ انتظر اكتمال الاستقبال ثم حدّث المعاينة.")
+            return
+        self.preview_snapshot = snapshot
         self.preview.delete("1.0", "end")
         self.preview.insert("1.0", head + "\n".join(kept) + "\n" + tail)
-        self.app.console(f"توليد سباق: {len(kept)} سطر مسجّل", "ok")
+        self.app.console(f"توليد سباق — الجلسة {self.app.session_id}: {len(kept)} سطر. راجع المقاسات والحركة قبل التشغيل.", "ok")
+
+    def _preview_current(self):
+        snapshot = self.app._training_snapshot()
+        if snapshot is None or getattr(self, "preview_snapshot", None) != snapshot:
+            messagebox.showerror("معاينة قديمة", "تغيرت بيانات التدريب أو ما زال الاستقبال قيد المعالجة؛ حدّث المعاينة قبل الحفظ أو النسخ.")
+            return False
+        return bool(self.preview.get("1.0", "end-1c").strip())
 
     def save(self):
+        if not self._preview_current():
+            return
         p = filedialog.asksaveasfilename(
             title="حفظ برنامج السباق", defaultextension=".py",
             filetypes=[("ملفات بايثون", "*.py")],
-            initialdir=os.path.join(os.path.dirname(self.app.current_path or APP_DIR)),
+            initialdir=(os.path.dirname(self.app.current_path) if self.app.current_path else APP_DIR),
             initialfile="race_" + time.strftime("%H%M%S") + ".py")
-        if not p:
+        if not p or not self._preview_current():
             return
         try:
-            with open(p, "w", encoding="utf-8") as f:
-                f.write(self.preview.get("1.0", "end-1c"))
+            atomic_write(p, self.preview.get("1.0", "end-1c"))
             self.app.console(f"حُفظ برنامج السباق: {p}", "ok")
             self.app._add_recent(p)
         except Exception as e:
             messagebox.showerror("خطأ", f"تعذر الحفظ:\n{e}")
 
     def to_editor(self):
+        if not self._preview_current() or not self.app._confirm_discard():
+            return
+        # The confirmation dialog runs a nested Tk event loop.
+        if not self._preview_current():
+            return
         content = self.preview.get("1.0", "end-1c")
+        if not content.strip():
+            return
         self.app.editor.delete("1.0", "end")
         self.app.editor.insert("1.0", content)
+        self.app.current_path = None
+        self.app._saved_text = ""
         self.app.editor.edit_modified(True)
+        self.app._set_file_label()
         self.win.destroy()
         self.app.editor.focus_set()
 
@@ -1380,16 +1685,29 @@ class RaceGenWindow:
 class Worker:
     def __init__(self):
         self.loop = asyncio.new_event_loop()
+        self.thread = None
+        self.ready = threading.Event()
 
     def start(self):
-        t = threading.Thread(target=self._run, name="ble-worker", daemon=True)
-        t.start()
-        while not self.loop.is_running():
-            time.sleep(0.01)
+        self.thread = threading.Thread(target=self._run, name="ble-worker", daemon=True)
+        self.thread.start()
+        if not self.ready.wait(5):
+            raise RuntimeError("تعذر بدء عامل الاتصال")
 
     def _run(self):
         asyncio.set_event_loop(self.loop)
-        self.loop.run_forever()
+        self.loop.call_soon(self.ready.set)
+        try:
+            self.loop.run_forever()
+        finally:
+            pending = asyncio.all_tasks(self.loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
+            self.loop.run_until_complete(self.loop.shutdown_default_executor())
+            self.loop.close()
 
 
 _WORKER = Worker()
@@ -1398,24 +1716,71 @@ _WORKER = Worker()
 # ---------------------------------------------------------------------------
 # نقطة البداية
 # ---------------------------------------------------------------------------
+def _run_gui(smoke=False):
+    root = None
+    app = None
+    try:
+        if PB_OK:
+            _WORKER.start()
+        root = tk.Tk()
+        app = App(root)
+        if smoke:
+            root.update()
+            app.console("سطر تجريبي 1", "info")
+            app.console("robot.straight(100)", "out")
+            app.console("تم ✔", "ok")
+            root.update()
+            app._saved_text = app.editor.get("1.0", "end-1c")
+            root.after(10, app._on_close)
+        root.mainloop()
+    except Exception as exc:
+        traceback.print_exc()
+        if root is not None:
+            try:
+                messagebox.showerror("تعذر تشغيل التطبيق", str(exc), parent=root)
+            except Exception:
+                traceback.print_exc()
+            try:
+                root.destroy()
+            except Exception:
+                traceback.print_exc()
+        raise SystemExit(1) from exc
+    finally:
+        # Also clean up when Tk fails or mainloop ends without WM_DELETE_WINDOW.
+        if app is not None:
+            app._closing = True
+            if app.serial_stop:
+                app.serial_stop.set()
+            if app.serial_thread:
+                app.serial_thread.join(timeout=1)
+            if _WORKER.loop.is_running():
+                try:
+                    future = getattr(app, "_shutdown_future", None)
+                    if future is None:
+                        future = asyncio.run_coroutine_threadsafe(app._shutdown(), _WORKER.loop)
+                    future.result(timeout=7)
+                except Exception:
+                    traceback.print_exc()
+            if app.session_file:
+                try:
+                    app.session_file.close()
+                except OSError:
+                    traceback.print_exc()
+        if _WORKER.loop.is_running():
+            _WORKER.loop.call_soon_threadsafe(_WORKER.loop.stop)
+        if _WORKER.thread:
+            _WORKER.thread.join(timeout=5)
+        elif not _WORKER.loop.is_closed():
+            _WORKER.loop.close()
+
+
 def main():
-    if PB_OK:
-        _WORKER.start()
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    _run_gui()
 
 
 def selftest():
-    """اختبار بناء الواجهة بدون تشغيل طويل"""
-    root = tk.Tk()
-    app = App(root)
-    root.update()
-    app.console("سطر تجريبي 1", "info")
-    app.console("robot.straight(100)", "out")
-    app.console("تم ✔", "ok")
-    root.update()
-    root.destroy()
+    """Build the UI and exercise the normal close path, with guaranteed cleanup."""
+    _run_gui(smoke=True)
     print("SELFTEST OK")
 
 
