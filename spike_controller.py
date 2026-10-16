@@ -154,7 +154,7 @@ try:
     from pybricksdev.ble import find_device
     from pybricksdev.ble.pybricks import StatusFlag
     from pybricksdev.connections import ConnectionState
-    from pybricksdev.connections.pybricks import PybricksHubBLE
+    from pybricksdev.connections.pybricks import PybricksHubBLE, PybricksHubUSB
 
     # كرت CSR بطيء في اكتشاف GATT — نمدّ مهلة الاتصال الافتراضية
     _orig_connect = BleakClient.connect
@@ -258,7 +258,7 @@ class App:
         self.cfg = self._load_config()
 
         self.queue: "queue.Queue" = queue.Queue()
-        self.hub = None                 # كائن PybricksHubBLE (يُنشئ في خيط BLE)
+        self.hub = None                 # كائن PybricksHubBLE/USB (يُنشئ في خيط BLE)
         self.capture = None
         self.busy = False
         self.connected = False
@@ -266,6 +266,8 @@ class App:
         self.rx_count = 0
         self.session_file = None
         self._hl_job = None
+        self.serial_running = False
+        self.serial_stop = None
 
         os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -363,6 +365,13 @@ class App:
         self.btn_connect.pack(side="left", padx=2)
         self.btn_disconnect = ttk.Button(bar, text="قطع الاتصال", command=self.action_disconnect)
         self.btn_disconnect.pack(side="left", padx=2)
+
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
+
+        self.btn_usb = ttk.Button(bar, text="اتصال بالسلك ▶", command=self.action_usb_connect)
+        self.btn_usb.pack(side="left", padx=2)
+        self.btn_serial = ttk.Button(bar, text="بث السلك ▶", command=self.action_serial_toggle)
+        self.btn_serial.pack(side="left", padx=2)
 
         ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
 
@@ -743,15 +752,29 @@ class App:
             if flags & FLAG_BATT_LOW:
                 parts.append("⚠ البطارية منخفضة!")
             self.lbl_prog.configure(text="   ".join(parts))
+        elif kind == "serial_state":
+            self.serial_running = bool(msg[1])
+            self.btn_serial.configure(
+                text="بث السلك ■" if self.serial_running else "بث السلك ▶")
         elif kind in ("op_done", "op_error"):
             _, name, res, err = msg
             self.busy = False
             if name == "connect" and err is None and res is not None:
                 self.hub = res
                 self.connected = True
-                dev = getattr(res, "_device", None)
+                label = getattr(res, "_app_label", None)
+                if not label:
+                    dev = getattr(res, "_device", None)
+                    label = getattr(dev, "name", None) or "?"
                 self.lbl_state.configure(
-                    text=f"● متصل: {getattr(dev, 'name', '?')} (فرموير {res.fw_version})",
+                    text=f"● متصل: {label} (فرموير {res.fw_version})",
+                    foreground=self.OK)
+            if name == "usb_connect" and err is None and res is not None:
+                self.hub = res
+                self.connected = True
+                self.lbl_state.configure(
+                    text=f"● متصل بالسلك: {getattr(res, '_app_label', 'USB')} "
+                         f"(فرموير {res.fw_version})",
                     foreground=self.OK)
             if name == "disconnect":
                 if self.capture:
@@ -800,9 +823,54 @@ class App:
                     pass
                 continue
             self._say(f"تم الاتصال بـ {dev.name} — الفرموير {hub.fw_version}", "ok")
+            hub._app_label = str(dev.name)
             self._install_capture(hub)
             return hub
         raise RuntimeError(f"لم يتم الاتصال بعد {retries} محاولات")
+
+    async def op_connect_usb(self):
+        """اتصال عبر كابل USB — يفحص دعم الفرموير أولاً"""
+        if not PB_OK:
+            raise RuntimeError(f"pybricksdev غير متوفر: {PB_ERR}")
+        try:
+            import usb.core
+            import usb.backend.libusb1
+            import libusb_package
+        except Exception as e:
+            raise RuntimeError(f"مكتبات USB غير مكتملة: {e}")
+
+        backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
+        if backend is None:
+            raise RuntimeError("تعذر تحميل مكتبة libusb")
+
+        dev = usb.core.find(idVendor=0x0694, idProduct=0x0009, backend=backend)
+        if dev is None:
+            raise RuntimeError("الروبوت غير موصول بالسلك — وصّل كابل USB أولاً")
+
+        # فحص الواجهات: هل يوجد واجهة Pybricks خاصة (0xFF)؟
+        classes = []
+        try:
+            cfgs = dev.configurations()
+            if cfgs:
+                classes = [i.bInterfaceClass for i in cfgs[0]]
+        except Exception:
+            pass
+        self._say("كابل USB مكتشف — الواجهات: " +
+                  (", ".join(hex(c) for c in classes) if classes else "؟"), "info")
+
+        if 0xFF not in classes:
+            self._say("فيرومور SPIKE Prime الحالي يعرض على السلك منفذ COM فقط (CDC) —", "err")
+            self._say("لا يدعم رفع/تشغيل البرامج بالسلك. الرفع يبقى عبر البلوتوث.", "info")
+            self._say("الدعم التجريبي للسلك يتطلب بناء فيرموير مخصصاً من labs.pybricks.com (غير موصى به قبل المسابقة).", "info")
+            raise RuntimeError("الكابل يعمل للشحن والاستقبال فقط على فيرمويرك الحالي")
+
+        # واجهة Pybricks موجودة ← مسار كامل ممكن
+        hub = PybricksHubUSB(dev)
+        await hub.connect()
+        hub._app_label = "USB سلك"
+        self._say(f"اتصال سلك ناجح! {getattr(hub, '_hub_name', '')} — الفرموير {hub.fw_version}", "ok")
+        self._install_capture(hub)
+        return hub
 
     def _install_capture(self, hub) -> None:
         cap = HubCapture(self.queue)
@@ -903,6 +971,7 @@ class App:
         b = self.busy
         self.btn_connect.configure(state="disabled" if (c or b) else "normal")
         self.btn_disconnect.configure(state="normal" if c else "disabled")
+        self.btn_usb.configure(state="disabled" if (c or b) else "normal")
         st_send = "normal" if (c and not b) else "disabled"
         self.btn_send.configure(state=st_send)
         self.btn_sendwait.configure(state=st_send)
@@ -917,6 +986,72 @@ class App:
 
     def action_disconnect(self):
         self._start_op("disconnect", self.op_disconnect(), allow_busy=True)
+
+    def action_usb_connect(self):
+        if self.connected and self.hub is not None:
+            self.console("اقطع الاتصال الحالي أولاً", "info")
+            return
+        self.console("جاري فحص كابل USB والاتصال بالسلك...", "info")
+        self._start_op("usb_connect", self.op_connect_usb())
+
+    # ---------------- بث السلك (استقبال من COM) ----------------
+    def action_serial_toggle(self):
+        if self.serial_running:
+            if self.serial_stop:
+                self.serial_stop.set()
+            self.console("إيقاف بث السلك...", "info")
+            return
+        port = self._find_hub_port()
+        if not port:
+            self.console("لا يوجد منفذ سلك للروبوت — وصّل كابل USB أولاً", "err")
+            return
+        self.serial_stop = threading.Event()
+        t = threading.Thread(target=self._serial_reader, args=(port,),
+                             name="serial-reader", daemon=True)
+        t.start()
+        self.console(f"فتح {port} — بانتظار بيانات الروبوت عبر السلك...", "info")
+
+    def _find_hub_port(self):
+        try:
+            from serial.tools import list_ports
+            for p in list_ports.comports():
+                if p.vid == 0x0694 and p.pid == 0x0009:
+                    return p.device
+        except Exception:
+            pass
+        return None
+
+    def _serial_reader(self, port: str) -> None:
+        try:
+            import serial as ser
+            s = ser.Serial(port, 115200, timeout=0.5)
+        except Exception as e:
+            self.queue.put(("console", f"تعذر فتح {port}: {e}", "err"))
+            self.queue.put(("serial_state", False))
+            return
+        buf = b""
+        got_any = False
+        try:
+            while not self.serial_stop.is_set():
+                data = s.read(256)
+                if data:
+                    got_any = True
+                    buf += data
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        text = line.decode("utf-8", "replace").rstrip("\r")
+                        if text:
+                            self.queue.put(("console", "[سلك] " + text, "out"))
+        finally:
+            try:
+                s.close()
+            except Exception:
+                pass
+            if not got_any:
+                self.queue.put(("console",
+                                "[سلك] أُغلق المنفذ — لم تصل بيانات (قد لا يبث الفرموير على السلك)",
+                                "info"))
+            self.queue.put(("serial_state", False))
 
     def _require_saved_file(self) -> str | None:
         if not self.current_path:
@@ -1104,6 +1239,8 @@ class App:
             if not messagebox.askyesno("خروج", "تعديلات غير محفوظة — الخروج بدون حفظ؟"):
                 return
         self._save_config()
+        if self.serial_stop:
+            self.serial_stop.set()
         if self.session_file:
             try:
                 self.session_file.close()
