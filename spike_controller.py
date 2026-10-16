@@ -36,8 +36,8 @@ from tkinter import filedialog, messagebox, ttk
 from spike_core import (MAX_LINES, MAX_LINE_BYTES, MAX_HUB_LOG_BYTES,
                         EventQueue, atomic_write, training_line, validated_config)
 from spike_documents import EditorDocument, canonical_path, tab_names
-from spike_transfer import (TransferFailure, configure_ble_upload,
-                            transfer_environment, wait_hub_idle)
+from spike_transfer import (TransferFailure, configure_ble_upload, needs_fresh_status,
+                            trace_upload_writes, transfer_environment, wait_hub_idle)
 
 # مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1400,6 +1400,9 @@ class App:
             # Record the exception chain BEFORE it is handed back across threads.
             self._say(f"[TX] phase={phase} failed: {type(exc).__name__}: {exc}", "err")
             self._say(f"[TX] {transfer_environment(hub)}", "err")
+            for note in getattr(exc, "__notes__", ()):
+                if note.startswith("[TX] upload "):
+                    self._say(note, "err")
             try:
                 with open(os.path.join(LOG_DIR, "transfer_errors.log"), "a", encoding="utf-8") as stream:
                     stream.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} phase={phase} "
@@ -1415,14 +1418,25 @@ class App:
     async def _quiet_stop(self, hub) -> None:
         async def stop_and_wait():
             await hub.stop_user_program()
-            await wait_hub_idle(hub)
+            if needs_fresh_status(hub):
+                self._say("[TX] waiting_for=fresh-idle-status")
+                await wait_hub_idle(hub, require_fresh=True)
+            else:
+                await wait_hub_idle(hub)
         await self._transfer_stage(hub, "stop-ready", stop_and_wait)
 
     async def _download_program(self, hub, path):
         # Cancellation or failure may leave only part of the program in hub RAM.
         self._download_uncertain = True
-        await self._transfer_stage(hub, "compile-upload", lambda: hub.download(path))
-        await self._transfer_stage(hub, "upload-ready", lambda: wait_hub_idle(hub))
+        async def upload():
+            with trace_upload_writes(hub):
+                await hub.download(path)
+        await self._transfer_stage(hub, "compile-upload", upload)
+        if needs_fresh_status(hub):
+            await self._transfer_stage(hub, "upload-ready",
+                                       lambda: wait_hub_idle(hub, require_fresh=True))
+        else:
+            await self._transfer_stage(hub, "upload-ready", lambda: wait_hub_idle(hub))
         self._download_uncertain = False
         self._say("تم رفع الملف كاملاً ✔", "ok")
 
