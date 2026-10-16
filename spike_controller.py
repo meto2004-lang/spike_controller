@@ -57,6 +57,32 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
+# --- عرض النص العربي بشكل صحيح في Tk ---
+# ودجات Tk لا تنفذ خوارزمية bidi، فتعرض النص العربي بترتيبه المنطقي
+# (من اليسار لليمين) أي الكلمات معكوسة. الحل: نعيد تشكيل الحروف
+# (presentation forms) ثم نرتبها ترتيباً بصرياً قبل الإدراج.
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display
+    RTL_OK = True
+except Exception:
+    RTL_OK = False
+
+_AR_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F]")
+
+
+def to_visual(text: str) -> str:
+    """إرجاع نص جاهز للعرض في ودجات Tk بحيث يظهر عربياً صحيحاً.
+
+    النصوص اللاتينية/الرقمية تبقى كما هي دون أي تغيير.
+    """
+    if not RTL_OK or not _AR_RE.search(text):
+        return text
+    try:
+        return get_display(arabic_reshaper.reshape(text))
+    except Exception:
+        return text
+
 DEFAULTS = {
     "geometry": "1220x780",
     "sash": 440,
@@ -264,6 +290,9 @@ class App:
         self.connected = False
         self.current_path = None
         self.rx_count = 0
+        # نسخة خام من أسطر الكونسول (بلا تحويل العرض) لتستخدمها
+        # أدوات التحليل: مولّد السباق وحفظ السجل — حتى لا تتأثر بالترتيب البصري
+        self.console_raw: list[str] = []
         self.session_file = None
         self._hl_job = None
         self.serial_running = False
@@ -703,9 +732,13 @@ class App:
     # ---------------- الكونسول ----------------
     def console(self, text: str, tag: str = "out") -> None:
         w = self.console_w
+        line = text.rstrip("\n")
+        self.console_raw.append((ts() + " " + line) if self._ts_var().get() else line)
+        if len(self.console_raw) > 20000:
+            del self.console_raw[:5000]
         if self._ts_var().get():
             w.insert("end", ts() + " ", "ts")
-        w.insert("end", text.rstrip("\n") + "\n", tag)
+        w.insert("end", to_visual(line) + "\n", tag)
         w.see("end")
         self.rx_count += 1
         self.lbl_rx.configure(text=f"{self.rx_count} سطر")
@@ -1207,7 +1240,7 @@ class App:
             return
         try:
             with open(p, "w", encoding="utf-8") as f:
-                f.write(self.console_w.get("1.0", "end-1c"))
+                f.write("\n".join(self.console_raw))
             self.console(f"صُدّر السجل: {p}", "ok")
         except Exception as e:
             messagebox.showerror("خطأ", f"تعذر التصدير:\n{e}")
@@ -1226,7 +1259,7 @@ class App:
         t.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         t.pack(fill="both", expand=True)
-        t.insert("1.0", HELP_TEXT)
+        t.insert("1.0", "\n".join(to_visual(line) for line in HELP_TEXT.split("\n")))
         t.configure(state="disabled")
 
     def _insert_at_cursor(self, text):
@@ -1292,7 +1325,9 @@ class RaceGenWindow:
         self.refresh()
 
     def refresh(self):
-        console_text = self.app.console_w.get("1.0", "end-1c")
+        # نستخدم النسخة الخام من الأسطر (لا المعرضة) حتى تبقى
+        # التعليقات العربية وعلامات # في صيغتها الأصلية للتحليل
+        console_text = "\n".join(self.app.console_raw)
         kept = []
         for line in console_text.splitlines():
             # إزالة الطابع الزمني إن وُجد (مثل 10:22:33)
