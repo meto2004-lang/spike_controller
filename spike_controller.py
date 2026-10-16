@@ -35,6 +35,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from spike_core import (MAX_LINES, MAX_LINE_BYTES, MAX_HUB_LOG_BYTES,
                         EventQueue, atomic_write, training_line, validated_config)
+from spike_transfer import (TransferFailure, configure_ble_upload,
+                            transfer_environment, wait_hub_idle)
 
 # مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -293,6 +295,7 @@ class App:
         self.queue: "queue.Queue" = EventQueue()
         self.hub = None                 # UI connection snapshot
         self._worker_hub = None         # worker-thread connection owner
+        self._download_uncertain = False
         self.capture = None
         self.busy = False
         self._operations = {}  # UI-thread futures, removed only by their own completion
@@ -989,6 +992,9 @@ class App:
             hub._app_label = str(dev.name)
             self._worker_hub = hub
             try:
+                advertised, effective = configure_ble_upload(hub)
+                self._say(f"[TX] BLE write_size={effective} hub_limit={advertised}")
+                self._say(f"[TX] {transfer_environment(hub)}")
                 self._install_capture(hub)
             except BaseException:
                 await asyncio.wait_for(hub.disconnect(), timeout=5)
@@ -1084,35 +1090,75 @@ class App:
             raise
         self.capture = cap
 
-    async def _quiet_stop(self, hub) -> None:
+    async def _transfer_stage(self, hub, phase, operation):
+        self._say(f"[TX] phase={phase}")
         try:
+            return await operation()
+        except Exception as exc:
+            # Record the exception chain BEFORE it is handed back across threads.
+            self._say(f"[TX] phase={phase} failed: {type(exc).__name__}: {exc}", "err")
+            self._say(f"[TX] {transfer_environment(hub)}", "err")
+            try:
+                with open(os.path.join(LOG_DIR, "transfer_errors.log"), "a", encoding="utf-8") as stream:
+                    stream.write(f"\n{time.strftime('%Y-%m-%d %H:%M:%S')} phase={phase} "
+                                 f"{transfer_environment(hub)}\n")
+                    traceback.print_exc(file=stream)
+            except OSError:
+                traceback.print_exc()
+            if "GATT" in type(exc).__name__ or "GATT" in str(exc):
+                self._say("فشل أمر بلوتوث. لم تتم إعادة المحاولة تلقائياً؛ أغلق اتصال Pybricks Code، "
+                          "ثم أعد الاتصال وحمّل الملف مجدداً. لا تغيّر الفرموير بناءً على هذا الخطأ وحده.", "err")
+            raise TransferFailure(phase, exc) from exc
+
+    async def _quiet_stop(self, hub) -> None:
+        async def stop_and_wait():
             await hub.stop_user_program()
-            await asyncio.sleep(0.5)
-        except Exception as e:
-            raise RuntimeError("تعذر إيقاف البرنامج السابق؛ أُلغي الإرسال حفاظاً على سلامة الروبوت") from e
+            await wait_hub_idle(hub)
+        await self._transfer_stage(hub, "stop-ready", stop_and_wait)
+
+    async def _download_program(self, hub, path):
+        # Cancellation or failure may leave only part of the program in hub RAM.
+        self._download_uncertain = True
+        await self._transfer_stage(hub, "compile-upload", lambda: hub.download(path))
+        await self._transfer_stage(hub, "upload-ready", lambda: wait_hub_idle(hub))
+        self._download_uncertain = False
+        self._say("تم رفع الملف كاملاً ✔", "ok")
 
     async def op_send_run(self, path, wait):
         hub = self._hub_or_raise()
         await self._quiet_stop(hub)
-        self._say(f"جاري الترجمة والرفع: {os.path.basename(path)} ...")
-        await hub.run(path, wait=wait, print_output=False, line_handler=True)
+        if getattr(hub, "_mpy_abi_version", 0):
+            # Older hubs do not support run(None). Preserve the library fallback.
+            self._download_uncertain = True
+            await self._transfer_stage(hub, "legacy-upload-run", lambda: hub.run(
+                path, wait=wait, print_output=False, line_handler=True))
+            self._download_uncertain = False
+        else:
+            self._say(f"جاري الترجمة والرفع: {os.path.basename(path)} ...")
+            await self._download_program(hub, path)
+            # A failed upload never reaches start; a failed start is NOT retried.
+            await self._transfer_stage(hub, "start-wait" if wait else "start", lambda: hub.run(
+                None, wait=wait, print_output=False, line_handler=True))
         if wait:
             self._say("انتهى تنفيذ البرنامج ✔", "ok")
         else:
-            self._say("تم الرفع والتشغيل ✔ — شغّل الروبوت عند نقطة البداية", "ok")
+            self._say("تم الرفع والتشغيل ✔ — يبدأ البرنامج فوراً؛ تأكد من وضع الروبوت الآمن", "ok")
 
     async def op_download_only(self, path):
         hub = self._hub_or_raise()
         await self._quiet_stop(hub)
         self._say(f"جاري التحميل بدون تشغيل: {os.path.basename(path)} ...")
-        await hub.download(path)
+        await self._download_program(hub, path)
         self._say("تم التحميل ✔ — شغّله لاحقاً بزر «تشغيل المخزن»", "ok")
 
     async def op_run_stored(self):
         hub = self._hub_or_raise()
+        if self._download_uncertain:
+            raise RuntimeError("فشل رفع سابق أو تم إلغاؤه؛ أعد تحميل ملف كامل بنجاح قبل تشغيل المخزن")
         await self._quiet_stop(hub)
         self._say("جاري تشغيل البرنامج المخزن ...")
-        await hub.run(None, wait=False, print_output=False, line_handler=True)
+        await self._transfer_stage(hub, "start-stored", lambda: hub.run(
+            None, wait=False, print_output=False, line_handler=True))
         self._say("تم تشغيل البرنامج المخزن ✔", "ok")
 
     async def op_stop(self):
