@@ -35,6 +35,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from spike_core import (MAX_LINES, MAX_LINE_BYTES, MAX_HUB_LOG_BYTES,
                         EventQueue, atomic_write, training_line, validated_config)
+from spike_documents import EditorDocument, canonical_path, tab_names
 from spike_transfer import (TransferFailure, configure_ble_upload,
                             transfer_environment, wait_hub_idle)
 
@@ -153,7 +154,7 @@ HELP_TEXT = """\
    - عند الاتصال تظهر الفرموير في شريط الحالة
 
 2) إرسال وتشغيل:
-   - افتح ملف .py أو اكتبه في المحرر
+   - افتح ملف .py في تبويب مستقل أو اكتبه في تبويب جديد
    - «إرسال وتشغيل» (F5): يرفع البرنامج ويشغّله فوراً
    - «إرسال وانتظار الانتهاء» (Ctrl+F5): ينتظر حتى ينتهي البرنامج
    - «تحميل فقط»: يحفظ البرنامج في الروبوت بدون تشغيل
@@ -170,7 +171,8 @@ HELP_TEXT = """\
    - قبل طباعة تسجيل تدريب جديد اضغط «جلسة جديدة / مسح»
    - بعد استقبال بيانات التدريب اضغط «توليد ملف سباق»
    - يستخرج الأسطر المسجّلة (robot.straight / robot.turn)
-   - راجع المعاينة ثم «حفظ كملف» وأرسله للروبوت
+   - راجع المعاينة ثم «فتح في تبويب جديد» أو «حفظ كملف»
+   - الإرسال يستخدم التبويب النشط ولا يغيّر برنامج التدريب في تبويبه
 
 5) الحفظ:
    - كل مخرجات الروبوت تُحفظ تلقائياً في مجلد logs
@@ -179,7 +181,9 @@ HELP_TEXT = """\
 6) اختصارات:
    F5 إرسال وتشغيل | Ctrl+F5 إرسال مع الانتظار
    Esc إيقاف البرنامج | F1 مساعدة
-   Ctrl+N/O/S جديد/فتح/حفظ | Ctrl+L جلسة جديدة ومسح البيانات
+   Ctrl+N/O/S تبويب جديد/فتح/حفظ | Ctrl+Shift+S حفظ باسم
+   Ctrl+W إغلاق التبويب | Ctrl+Tab / Ctrl+Shift+Tab تنقل
+   Ctrl+L جلسة جديدة ومسح البيانات
    Ctrl+Shift+C نسخ المحدد من الكونسول (أو زر يمين في الكونسول)
 
 7) الكونسول:
@@ -303,9 +307,15 @@ class App:
         self._async_tasks = {}  # worker-thread tasks
         self._op_lock = None
         self._closing = False
+        self._confirming_close = False
         self._poll_job = None
         self.connected = False
-        self.current_path = None
+        self.documents: list[EditorDocument] = []
+        self.active_document = None
+        self._untitled_counter = 0
+        self._pressed_close = None
+        self._sending_path = None
+        self._send_op_id = None
         self.rx_count = 0
         # نسخة خام من أسطر الكونسول (بلا تحويل العرض) لتستخدمها
         # أدوات التحليل: مولّد السباق وحفظ السجل — حتى لا تتأثر بالترتيب البصري
@@ -314,10 +324,8 @@ class App:
         self.training_overflow = False
         self.training_revision = 0
         self._disconnecting_hub = None
-        self._saved_text = STARTER_TEXT
         self.session_id = 1
         self.session_file = None
-        self._hl_job = None
         self.serial_running = False
         self.serial_stop = None
         self.serial_thread = None
@@ -340,6 +348,42 @@ class App:
 
         if self.cfg.get("autoconnect"):
             self.root.after(500, self.action_connect)
+
+    @property
+    def editor(self):
+        return self.active_document.editor
+
+    @property
+    def ln(self):
+        return self.active_document.gutter
+
+    @property
+    def sb_ed(self):
+        return self.active_document.scrollbar
+
+    @property
+    def current_path(self):
+        return self.active_document.path
+
+    @current_path.setter
+    def current_path(self, value):
+        self.active_document.path = value
+
+    @property
+    def _saved_text(self):
+        return self.active_document.saved_text
+
+    @_saved_text.setter
+    def _saved_text(self, value):
+        self.active_document.saved_text = value
+
+    @property
+    def _hl_job(self):
+        return self.active_document.highlight_job
+
+    @_hl_job.setter
+    def _hl_job(self, value):
+        self.active_document.highlight_job = value
 
     # ---------------- إعدادات ----------------
     def _load_config(self) -> dict:
@@ -455,6 +499,31 @@ class App:
         self.btn_export = ttk.Button(bar, text="تصدير السجل", command=self.action_export_log)
         self.btn_export.pack(side="left", padx=2)
 
+        # Reserve a full row so the in-flight target cannot be squeezed by buttons.
+        self.lbl_send_target = ttk.Label(self.root, text="", width=1, anchor="w",
+                                         style="Header.TLabel")
+        self.lbl_send_target.pack(side="top", fill="x", padx=12, pady=(2, 4))
+
+        # ---- شريط الحالة ----
+        sb = ttk.Frame(self.root, padding=(10, 4))
+        sb.pack(side="bottom", fill="x")
+        self.lbl_state = ttk.Label(sb, text="● غير متصل", foreground=self.ERR)
+        self.lbl_state.pack(side="left")
+        self.lbl_prog = ttk.Label(sb, text="", style="Header.TLabel")
+        self.lbl_prog.pack(side="left", padx=14)
+        self.chk_ts = tk.Checkbutton(sb, text="طوابع زمنية", variable=self._ts_var(),
+                                     command=self._toggle_ts, bg=self.BG, fg="#9aa3b5",
+                                     selectcolor=self.PANEL, activebackground=self.BG,
+                                     activeforeground=self.FG)
+        self.chk_ts.pack(side="left", padx=6)
+        self.chk_al = tk.Checkbutton(sb, text="حفظ تلقائي", variable=self._al_var(),
+                                     command=self._toggle_al, bg=self.BG, fg="#9aa3b5",
+                                     selectcolor=self.PANEL, activebackground=self.BG,
+                                     activeforeground=self.FG)
+        self.chk_al.pack(side="left", padx=6)
+        self.lbl_rx = ttk.Label(sb, text="0 سطر", style="Header.TLabel")
+        self.lbl_rx.pack(side="right")
+
         # ---- منطقة رئيسية: محرر + كونسول ----
         self.paned = ttk.PanedWindow(self.root, orient="vertical")
         self.paned.pack(fill="both", expand=True, padx=8, pady=(0, 4))
@@ -462,29 +531,28 @@ class App:
         # محرر
         ed_frame = ttk.Frame(self.paned)
         self.paned.add(ed_frame, weight=3)
-        ttk.Label(ed_frame, text="المحرر", style="Header.TLabel").pack(anchor="e")
+        # Keep the document identity out of the crowded connection/status bar.
+        document_header = ttk.Frame(ed_frame)
+        document_header.pack(fill="x", pady=(0, 2))
+        document_header.columnconfigure(0, weight=1)
+        self.lbl_file = ttk.Label(document_header, text="", anchor="w", width=1,
+                                  font=("Segoe UI", 10, "bold"))
+        self.lbl_file.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+        ttk.Button(document_header, text="+", width=3, command=self.action_new).grid(row=0, column=1)
+        ttk.Button(document_header, text=to_visual("إغلاق التبويب"),
+                   command=self.action_close_tab).grid(row=0, column=2, padx=4)
+        self.file_path_var = tk.StringVar(value="")
+        self.file_path_entry = ttk.Entry(ed_frame, textvariable=self.file_path_var,
+                                         state="readonly", takefocus=True)
+        self.file_path_entry.pack(fill="x", pady=(0, 4))
 
-        ed_box = tk.Frame(ed_frame, bg=self.BG)
-        ed_box.pack(fill="both", expand=True)
-        self.ln = tk.Text(ed_box, width=4, padx=6, takefocus=0, border=0,
-                          state="disabled", bg=self.PANEL, fg="#5c6373",
-                          font=("Consolas", 11), cursor="arrow")
-        self.ln.pack(side="left", fill="y")
-        self.editor = tk.Text(ed_box, wrap="none", undo=True, border=0,
-                              bg=self.ENTRY_BG, fg=self.FG, insertbackground=self.FG,
-                              font=("Consolas", 12), padx=8, pady=6,
-                              selectbackground=self.ACCENT)
-        self.sb_ed = ttk.Scrollbar(ed_box, orient="vertical",
-                                   command=self._editor_scroll)
-        self.editor.configure(yscrollcommand=self._editor_yview)
-        self.sb_ed.pack(side="right", fill="y")
-        self.editor.pack(side="left", fill="both", expand=True)
-        hscroll = ttk.Scrollbar(ed_frame, orient="horizontal", command=self.editor.xview)
-        self.editor.configure(xscrollcommand=hscroll.set)
-        hscroll.pack(fill="x")
-
-        self.editor.insert("1.0", STARTER_TEXT)
-        self.editor.edit_reset()
+        self._build_tab_style()
+        self.notebook = ttk.Notebook(ed_frame, style="Documents.TNotebook")
+        self.notebook.pack(fill="both", expand=True)
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self.notebook.bind("<ButtonPress-1>", self._tab_close_press, add="+")
+        self.notebook.bind("<ButtonRelease-1>", self._tab_close_release, add="+")
+        self._new_document()
 
         # كونسول
         cs_frame = ttk.Frame(self.paned)
@@ -522,42 +590,13 @@ class App:
         for event in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<PasteSelection>>"):
             self.console_w.bind(event, lambda e: "break")
         self.console_w.bind("<Button-3>", self._console_menu)
-        self.editor.bind("<Button-3>", self._editor_menu)
 
-        # محرر: تلوين الصيغة + أرقام الأسطر
-        self.editor.tag_configure("kw", foreground="#79b8ff")
-        self.editor.tag_configure("str", foreground="#a5d6a7")
-        self.editor.tag_configure("com", foreground="#6a7385", font=("Consolas", 12, "italic"))
-        self.editor.tag_configure("num", foreground="#f2a73b")
-        self.editor.bind("<<Modified>>", self._on_editor_modified)
-        self.editor.bind("<MouseWheel>", lambda e: self.root.after_idle(self._update_lineno))
-        self._update_lineno()
         try:
             self.paned.sashpos(0, int(self.cfg.get("sash", 440)))
         except Exception:
             pass
 
-        # ---- شريط الحالة ----
-        sb = ttk.Frame(self.root, padding=(10, 4))
-        sb.pack(side="bottom", fill="x")
-        self.lbl_state = ttk.Label(sb, text="● غير متصل", foreground=self.ERR)
-        self.lbl_state.pack(side="left")
-        self.lbl_prog = ttk.Label(sb, text="", style="Header.TLabel")
-        self.lbl_prog.pack(side="left", padx=14)
-        self.chk_ts = tk.Checkbutton(sb, text="طوابع زمنية", variable=self._ts_var(),
-                                     command=self._toggle_ts, bg=self.BG, fg="#9aa3b5",
-                                     selectcolor=self.PANEL, activebackground=self.BG,
-                                     activeforeground=self.FG)
-        self.chk_ts.pack(side="left", padx=6)
-        self.chk_al = tk.Checkbutton(sb, text="حفظ تلقائي", variable=self._al_var(),
-                                     command=self._toggle_al, bg=self.BG, fg="#9aa3b5",
-                                     selectcolor=self.PANEL, activebackground=self.BG,
-                                     activeforeground=self.FG)
-        self.chk_al.pack(side="left", padx=6)
-        self.lbl_file = ttk.Label(sb, text="ملف جديد", style="Header.TLabel")
-        self.lbl_file.pack(side="right", padx=8)
-        self.lbl_rx = ttk.Label(sb, text="0 سطر", style="Header.TLabel")
-        self.lbl_rx.pack(side="right")
+        self._set_file_label()
 
     def _ts_var(self):
         if not hasattr(self, "_v_ts"):
@@ -591,6 +630,7 @@ class App:
         m_file.add_command(label="حفظ", accelerator="Ctrl+S", command=self.action_save)
         m_file.add_command(label="حفظ باسم...", accelerator="Ctrl+Shift+S",
                            command=self.action_save_as)
+        m_file.add_command(label="إغلاق التبويب", accelerator="Ctrl+W", command=self.action_close_tab)
         self.m_recent = tk.Menu(m_file, tearoff=0)
         m_file.add_cascade(label="آخر الملفات", menu=self.m_recent)
         self._refresh_recent_menu()
@@ -648,50 +688,212 @@ class App:
 
         self.root.config(menu=menubar)
 
-    def _bind_shortcuts(self) -> None:
-        r = self.root
-        r.bind_all("<Control-n>", lambda e: self.action_new())
-        r.bind_all("<Control-o>", lambda e: self.action_open())
-        r.bind_all("<Control-s>", lambda e: self.action_save())
-        r.bind_all("<Control-S>", lambda e: self.action_save_as())
-        r.bind_all("<Control-g>", lambda e: self.action_race_gen())
-        r.bind_all("<Control-l>", lambda e: self.action_clear_console())
-        r.bind_all("<Control-Shift-C>", lambda e: self._copy_console())
-        r.bind_all("<F5>", lambda e: self.action_send_run())
-        r.bind_all("<Control-F5>", lambda e: self.action_send_wait())
-        r.bind_all("<Escape>", lambda e: self.action_stop())
-        r.bind_all("<F1>", lambda e: self.action_help())
+    def _shortcut_bindings(self):
+        return {
+            "<Control-n>": self.action_new, "<Control-o>": self.action_open,
+            "<Control-s>": self.action_save, "<Control-S>": self.action_save_as,
+            "<Control-w>": self.action_close_tab,
+            "<Control-Tab>": lambda: self._cycle_document(1),
+            "<Control-Shift-Tab>": lambda: self._cycle_document(-1),
+            "<Control-ISO_Left_Tab>": lambda: self._cycle_document(-1),
+            "<Control-g>": self.action_race_gen, "<Control-l>": self.action_clear_console,
+            "<F5>": self.action_send_run, "<Control-F5>": self.action_send_wait,
+            "<Escape>": self.action_stop, "<F1>": self.action_help,
+        }
 
-    # ---------------- محرر: أرقام الأسطر وتلوين الصيغة ----------------
-    def _editor_yview(self, first, last):
-        # مزامنة أرقام الأسطر مع التمرير
-        self.ln.yview_moveto(first)
-        self.sb_ed.set(first, last)
+    def _run_shortcut(self, action):
+        if not self._closing and not self._confirming_close:
+            action()
+        return "break"
 
-    def _editor_scroll(self, *args):
-        self.editor.yview(*args)
-        self.ln.yview(*args)
+    def _bind_shortcuts(self):
+        for sequence, action in self._shortcut_bindings().items():
+            self.root.bind_all(sequence, lambda e, a=action: self._run_shortcut(a))
+        self.root.bind_all("<Control-Shift-C>", lambda e: self._run_shortcut(self._copy_console))
 
-    def _update_lineno(self) -> None:
-        try:
-            count = int(self.editor.index("end-1c").split(".")[0])
-        except Exception:
+    # ---------------- التبويبات ----------------
+    def _build_tab_style(self):
+        style = ttk.Style(self.root)
+        images = []
+        for color in (self.FG, self.ERR, self.WARN):
+            image = tk.PhotoImage(master=self.root, width=12, height=12)
+            for offset in range(3, 9):
+                image.put(color, (offset, offset))
+                image.put(color, (11 - offset, offset))
+            images.append(image)
+        self._tab_close_images = images  # Tk images must remain referenced.
+        style.element_create("Documents.close", "image", images[0],
+                             ("pressed", images[2]), ("active", images[1]), sticky="")
+        style.layout("Documents.TNotebook.Tab", [
+            ("Notebook.tab", {"sticky": "nswe", "children": [
+                ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+                    ("Notebook.focus", {"side": "top", "sticky": "nswe", "children": [
+                        ("Notebook.label", {"side": "left", "sticky": ""}),
+                        ("Documents.close", {"side": "right", "sticky": ""}),
+                    ]}),
+                ]}),
+            ]}),
+        ])
+
+    def _create_editor_tab(self, content, path, saved, number, suggested_name):
+        frame = ttk.Frame(self.notebook)
+        horizontal = ttk.Scrollbar(frame, orient="horizontal")
+        horizontal.pack(side="bottom", fill="x")
+        box = tk.Frame(frame, bg=self.BG)
+        box.pack(fill="both", expand=True)
+        gutter = tk.Text(box, width=4, padx=6, pady=6, takefocus=0, border=0,
+                         state="disabled", wrap="none", bg=self.PANEL, fg="#5c6373",
+                         font=("Consolas", 12), cursor="arrow")
+        gutter.pack(side="left", fill="y")
+        editor = tk.Text(box, wrap="none", undo=True, border=0,
+                         bg=self.ENTRY_BG, fg=self.FG, insertbackground=self.FG,
+                         font=("Consolas", 12), padx=8, pady=6,
+                         selectbackground=self.ACCENT)
+        vertical = ttk.Scrollbar(box, orient="vertical")
+        vertical.pack(side="right", fill="y")
+        editor.pack(side="left", fill="both", expand=True)
+        document = EditorDocument(frame, editor, gutter, vertical, path,
+                                  content if saved else "", number, suggested_name)
+        vertical.configure(command=lambda *args: self._editor_scroll(*args, document=document))
+        editor.configure(yscrollcommand=lambda first, last: self._editor_yview(first, last, document),
+                         xscrollcommand=horizontal.set)
+        horizontal.configure(command=editor.xview)
+        editor.tag_configure("kw", foreground="#79b8ff")
+        editor.tag_configure("str", foreground="#a5d6a7")
+        editor.tag_configure("com", foreground="#6a7385", font=("Consolas", 12, "italic"))
+        editor.tag_configure("num", foreground="#f2a73b")
+        editor.insert("1.0", content)
+        editor.edit_reset()
+        editor.edit_modified(False)
+        editor.bind("<<Modified>>", lambda e: self._on_editor_modified(e, document))
+        editor.bind("<Button-3>", self._editor_menu)
+        for sequence, action in self._shortcut_bindings().items():
+            editor.bind(sequence, lambda e, a=action: self._run_shortcut(a))
+        return document
+
+    def _new_document(self, content=STARTER_TEXT, path=None, saved=True, suggested_name=None):
+        if self._closing or self._confirming_close:
+            return None
+        if path is None:
+            self._untitled_counter += 1
+        document = self._create_editor_tab(content, path, saved, self._untitled_counter, suggested_name)
+        self.documents.append(document)
+        self.notebook.add(document.frame, text=to_visual(document.name))
+        self._select_document(document)
+        self._update_lineno(document)
+        document.highlight_job = self.root.after_idle(lambda: self._rehighlight(document))
+        return document
+
+    def _select_document(self, document):
+        if document not in self.documents:
             return
-        self.ln.configure(state="normal")
-        self.ln.delete("1.0", "end")
-        self.ln.insert("1.0", "\n".join(str(i) for i in range(1, count + 1)))
-        self.ln.configure(state="disabled")
+        self.active_document = document
+        self.notebook.select(document.frame)
+        self._set_file_label()
+        document.editor.focus_set()
 
-    def _on_editor_modified(self, _event=None) -> None:
+    def _on_tab_changed(self, _event=None):
         if self._closing:
             return
-        if self.editor.edit_modified():
-            self.editor.edit_modified(False)
-            self._update_lineno()
+        selected = self.notebook.select()
+        for document in self.documents:
+            if str(document.frame) == selected:
+                if document is not self.active_document:
+                    self.active_document = document
+                    self._set_file_label()
+                    document.editor.focus_set()
+                break
+
+    def _cycle_document(self, direction):
+        if self.documents:
+            index = self.documents.index(self.active_document)
+            self._select_document(self.documents[(index + direction) % len(self.documents)])
+
+    def _document_at(self, x, y):
+        try:
+            return self.documents[self.notebook.index(f"@{x},{y}")]
+        except (tk.TclError, IndexError):
+            return None
+
+    def _tab_close_press(self, event):
+        if self.notebook.identify(event.x, event.y).endswith(".close"):
+            self._pressed_close = self._document_at(event.x, event.y)
+            return "break"
+
+    def _tab_close_release(self, event):
+        document, self._pressed_close = self._pressed_close, None
+        if document is not None:
+            if (self.notebook.identify(event.x, event.y).endswith(".close")
+                    and self._document_at(event.x, event.y) is document):
+                self._close_document(document)
+            return "break"
+
+    def _close_document(self, document):
+        if self._closing or self._confirming_close or document not in self.documents:
+            return False
+        self._confirming_close = True
+        try:
+            if not self._confirm_discard(document):
+                return False
+        finally:
+            self._confirming_close = False
+        index = self.documents.index(document)
+        if document.highlight_job:
+            self.root.after_cancel(document.highlight_job)
+            document.highlight_job = None
+        self.notebook.forget(document.frame)
+        self.documents.remove(document)
+        document.frame.destroy()
+        if not self.documents:
+            self.active_document = None
+            self._new_document()
+        elif self.active_document is document:
+            self._select_document(self.documents[min(index, len(self.documents) - 1)])
+        else:
             self._set_file_label()
-            if self._hl_job:
-                self.root.after_cancel(self._hl_job)
-            self._hl_job = self.root.after_idle(self._rehighlight)
+        return True
+
+    def action_close_tab(self):
+        return self._close_document(self.active_document)
+
+    # ---------------- محرر: أرقام الأسطر وتلوين الصيغة ----------------
+    def _editor_yview(self, first, last, document=None):
+        document = document or self.active_document
+        document.gutter.yview_moveto(first)
+        document.scrollbar.set(first, last)
+
+    def _editor_scroll(self, *args, document=None):
+        document = document or self.active_document
+        document.editor.yview(*args)
+        document.gutter.yview(*args)
+
+    def _update_lineno(self, document=None):
+        document = document or self.active_document
+        if document not in self.documents:
+            return
+        try:
+            count = int(document.editor.index("end-1c").split(".")[0])
+            first = document.editor.yview()[0]
+        except Exception:
+            return
+        gutter = document.gutter
+        gutter.configure(state="normal", width=max(4, len(str(count))))
+        gutter.delete("1.0", "end")
+        gutter.insert("1.0", "\n".join(str(i) for i in range(1, count + 1)))
+        gutter.configure(state="disabled")
+        gutter.yview_moveto(first)
+
+    def _on_editor_modified(self, _event=None, document=None):
+        document = document or self.active_document
+        if self._closing or document not in self.documents:
+            return
+        if document.editor.edit_modified():
+            document.editor.edit_modified(False)
+            self._update_lineno(document)
+            self._set_file_label()
+            if document.highlight_job:
+                self.root.after_cancel(document.highlight_job)
+            document.highlight_job = self.root.after_idle(lambda: self._rehighlight(document))
 
     KW = ["from", "import", "def", "class", "return", "if", "elif", "else", "for",
           "while", "try", "except", "finally", "with", "as", "in", "not", "and",
@@ -699,9 +901,12 @@ class App:
           "global", "nonlocal", "del", "raise", "yield", "assert", "is", "await",
           "async"]
 
-    def _rehighlight(self) -> None:
-        self._hl_job = None
-        t = self.editor
+    def _rehighlight(self, document=None) -> None:
+        document = document or self.active_document
+        if self._closing or document not in self.documents:
+            return
+        document.highlight_job = None
+        t = document.editor
         for tag in ("kw", "str", "com", "num"):
             t.tag_remove(tag, "1.0", "end")
         text = t.get("1.0", "end-1c")
@@ -721,7 +926,7 @@ class App:
     # ---------------- أدوات التحديد والنسخ ----------------
     def _console_key(self, event) -> str | None:
         """Handle application shortcuts before Tk Text's class bindings."""
-        if self._closing:
+        if self._closing or self._confirming_close:
             return "break"
         ctrl = bool(event.state & 0x4)
         shift = bool(event.state & 0x1)
@@ -734,6 +939,9 @@ class App:
         elif key == "f5":
             action = self.action_send_wait if ctrl else self.action_send_run
         elif ctrl:
+            if key in ("tab", "iso_left_tab"):
+                self._cycle_document(-1 if shift or key == "iso_left_tab" else 1)
+                return "break"
             if key == "c":
                 if shift:
                     self._copy_console()
@@ -743,7 +951,7 @@ class App:
                 self._select_all_console()
                 return "break"
             action_name = {
-                "n": "action_new", "o": "action_open",
+                "n": "action_new", "o": "action_open", "w": "action_close_tab",
                 "s": "action_save_as" if shift else "action_save",
                 "g": "action_race_gen", "l": "action_clear_console",
             }.get(key)
@@ -787,15 +995,16 @@ class App:
         m.tk_popup(event.x_root, event.y_root)
 
     def _editor_menu(self, event) -> None:
+        widget = event.widget
         m = tk.Menu(self.root, tearoff=0)
         m.add_command(label="قص", accelerator="Ctrl+X",
-                      command=lambda: self.editor.event_generate("<<Cut>>"))
+                      command=lambda: widget.event_generate("<<Cut>>"))
         m.add_command(label="نسخ", accelerator="Ctrl+C",
-                      command=lambda: self.editor.event_generate("<<Copy>>"))
+                      command=lambda: widget.event_generate("<<Copy>>"))
         m.add_command(label="لصق", accelerator="Ctrl+V",
-                      command=lambda: self.editor.event_generate("<<Paste>>"))
+                      command=lambda: widget.event_generate("<<Paste>>"))
         m.add_separator()
-        self._popup_copy_items(m, self.editor)
+        self._popup_copy_items(m, widget)
         m.tk_popup(event.x_root, event.y_root)
 
     # ---------------- الكونسول ----------------
@@ -915,6 +1124,10 @@ class App:
         elif kind in ("op_done", "op_error"):
             _, op_id, name, res, err = msg
             self._operations.pop(op_id, None)
+            if op_id == self._send_op_id:
+                self._send_op_id = None
+                self._sending_path = None
+                self._update_send_target()
             self.busy = bool(self._operations)
             if name in ("connect", "usb_connect") and err is None and res is not self._worker_hub:
                 self._refresh_buttons()
@@ -1354,31 +1567,40 @@ class App:
                     self.queue.put(("console", f"تعذر إغلاق {port}: {exc}", "err"))
             self.queue.put(("serial_state", False, stop))
 
-    def _require_saved_file(self) -> str | None:
-        if not self.current_path or self._editor_dirty():
-            if not self.action_save():
+    def _require_saved_file(self, document=None):
+        document = document or self.active_document
+        if not document.path or document.dirty:
+            if not self._save_document(document):
                 return None
-        return self.current_path
+        return document.path
+
+    def _send_document(self, operation, wait=False):
+        if self._closing or self._confirming_close or self.busy:
+            return False
+        document = self.active_document
+        path = self._require_saved_file(document)
+        if not path:
+            return False
+        if operation == "download":
+            factory = lambda: self.op_download_only(path)
+        else:
+            factory = lambda: self.op_send_run(path, wait=wait)
+        if self._start_op(operation, factory):
+            self._sending_path = path
+            self._send_op_id = self._next_op
+            self._update_send_target()
+            self.console(f"إرسال الملف: {os.path.basename(path)}", "info")
+            return True
+        return False
 
     def action_send_run(self):
-        path = self._require_saved_file()
-        if not path:
-            return
-        self.console(f"إرسال وتشغيل: {os.path.basename(path)}", "info")
-        self._start_op("send_run", lambda: self.op_send_run(path, wait=False))
+        return self._send_document("send_run")
 
     def action_send_wait(self):
-        path = self._require_saved_file()
-        if not path:
-            return
-        self.console(f"إرسال مع الانتظار: {os.path.basename(path)}", "info")
-        self._start_op("send_wait", lambda: self.op_send_run(path, wait=True))
+        return self._send_document("send_wait", wait=True)
 
     def action_download_only(self):
-        path = self._require_saved_file()
-        if not path:
-            return
-        self._start_op("download", lambda: self.op_download_only(path))
+        return self._send_document("download")
 
     def action_run_stored(self):
         self._start_op("run_stored", self.op_run_stored)
@@ -1388,89 +1610,119 @@ class App:
             self._start_op("stop", self.op_stop, allow_busy=True)
 
     # ---------------- الملفات ----------------
-    def _editor_dirty(self) -> bool:
-        # Tk's modified flag is reset for event delivery, not document state.
-        return self.editor.get("1.0", "end-1c") != self._saved_text
+    def _editor_dirty(self):
+        return self.active_document.dirty
 
-    def _confirm_discard(self) -> bool:
-        if not self._editor_dirty():
+    def _confirm_discard(self, document=None):
+        document = document or self.active_document
+        if not document.dirty:
             return True
-        return messagebox.askyesno("تعديلات غير محفوظة",
-                                   "هناك تعديلات غير محفوظة. هل تريد المتابعة دون حفظ؟")
+        self._select_document(document)
+        answer = messagebox.askyesnocancel(
+            "تعديلات غير محفوظة", f"هل تريد حفظ التعديلات على {document.name} قبل الإغلاق؟")
+        if answer is None:
+            return False
+        return self._save_document(document) if answer else True
 
     def action_new(self):
-        if not self._confirm_discard():
-            return
-        self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", STARTER_TEXT)
-        self.editor.edit_reset()
-        self.editor.edit_modified(False)
-        self._saved_text = STARTER_TEXT
-        self.current_path = None
-        self._set_file_label()
+        return self._new_document()
 
     def action_open(self):
-        p = filedialog.askopenfilename(
-            title="فتح ملف بايثون",
-            filetypes=[("ملفات بايثون", "*.py"), ("الكل", "*.*")],
-            initialdir=(os.path.dirname(self.current_path) if self.current_path else APP_DIR))
-        if not p:
-            return
-        self._open_path(p)
-
-    def _open_path(self, p):
-        if not self._confirm_discard():
+        if self._closing or self._confirming_close:
             return False
+        path = filedialog.askopenfilename(
+            title="فتح ملف بايثون", filetypes=[("ملفات بايثون", "*.py"), ("الكل", "*.*")],
+            initialdir=(os.path.dirname(self.current_path) if self.current_path else APP_DIR))
+        return self._open_path(path) if path else False
+
+    def _find_document(self, path):
+        key = canonical_path(path)
+        return next((document for document in self.documents
+                     if document.path and canonical_path(document.path) == key), None)
+
+    def _open_path(self, path):
+        if self._closing or self._confirming_close:
+            return False
+        existing = self._find_document(path)
+        if existing:
+            self._select_document(existing)
+            return True
         try:
-            with open(p, "r", encoding="utf-8") as f:
-                text = f.read()
-        except Exception as e:
-            messagebox.showerror("خطأ", f"تعذر فتح الملف:\n{e}")
-            return
-        self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", text)
-        self.editor.edit_reset()
-        self.editor.edit_modified(False)
-        self._saved_text = text
-        self.current_path = p
-        self._add_recent(p)
-        self._set_file_label()
-        self.console(f"فُتح: {p}", "ok")
+            with open(path, "r", encoding="utf-8-sig") as stream:
+                text = stream.read()
+        except Exception as exc:
+            messagebox.showerror("خطأ", f"تعذر فتح الملف:\n{exc}")
+            return False
+        self._new_document(text, path=os.path.abspath(path))
+        self._add_recent(os.path.abspath(path))
+        self.console(f"فُتح: {path}", "ok")
         return True
 
     def action_save(self):
-        if not self.current_path:
-            return self.action_save_as()
-        return self._save_to(self.current_path)
+        if self._confirming_close:
+            return False
+        return self._save_document(self.active_document)
 
     def action_save_as(self):
-        p = filedialog.asksaveasfilename(
-            title="حفظ باسم", defaultextension=".py",
-            filetypes=[("ملفات بايثون", "*.py")],
-            initialdir=(os.path.dirname(self.current_path) if self.current_path else APP_DIR),
-            initialfile=os.path.basename(self.current_path or "program.py"))
-        if not p:
+        if self._confirming_close:
             return False
-        return self._save_to(p)
+        return self._save_document(self.active_document, save_as=True)
 
-    def _save_to(self, p):
-        try:
-            text = self.editor.get("1.0", "end-1c")
-            atomic_write(p, text)
-        except Exception as e:
-            messagebox.showerror("خطأ", f"تعذر الحفظ:\n{e}")
+    def _save_document(self, document, save_as=False):
+        if self._closing or document not in self.documents:
             return False
-        self._saved_text = text
-        self.editor.edit_modified(False)
-        self.current_path = p
-        self._add_recent(p)
+        path = document.path
+        if not path or save_as:
+            path = filedialog.asksaveasfilename(
+                title="حفظ باسم", defaultextension=".py", filetypes=[("ملفات بايثون", "*.py")],
+                initialdir=os.path.dirname(path) if path else APP_DIR,
+                initialfile=os.path.basename(path) if path else (
+                    document.suggested_name or f"program_{document.number}.py"))
+            if not path:
+                return False
+        return self._save_to(path, document)
+
+    def _save_to(self, path, document=None):
+        document = document or self.active_document
+        if self._closing or document not in self.documents:
+            return False
+        owner = self._find_document(path)
+        if owner is not None and owner is not document:
+            messagebox.showerror("ملف مفتوح", "هذا الملف مفتوح في تبويب آخر؛ احفظ باسم مختلف أو انتقل إلى تبويبه.")
+            return False
+        try:
+            text = document.editor.get("1.0", "end-1c")
+            atomic_write(path, text)
+        except Exception as exc:
+            messagebox.showerror("خطأ", f"تعذر الحفظ:\n{exc}")
+            return False
+        document.saved_text = text
+        document.editor.edit_modified(False)
+        document.path = os.path.abspath(path)
+        self._add_recent(document.path)
         self._set_file_label()
-        self.console(f"حُفظ: {p}", "ok")
+        self.console(f"حُفظ: {path}", "ok")
         return True
 
+    def _update_send_target(self):
+        path = self._sending_path
+        label = to_visual("ملف العملية الحالية:") if path else to_visual("سيُرسل:")
+        name = (f"{os.path.basename(path)} — {os.path.dirname(os.path.abspath(path))}"
+                if path else self.active_document.name)
+        self.lbl_send_target.configure(text=f"{label} {to_visual(name)}")
+
     def _set_file_label(self):
-        name = os.path.basename(self.current_path) if self.current_path else "ملف جديد"
-        self.lbl_file.configure(text=("* " if self._editor_dirty() else "") + name)
+        if self.active_document is None:
+            return
+        for document, title in tab_names(self.documents).items():
+            self.notebook.tab(document.frame, text=to_visual(title) + "  ")
+        document = self.active_document
+        marker = "* " if document.dirty else ""
+        self.lbl_file.configure(text=marker + to_visual(document.name))
+        self.file_path_var.set(os.path.abspath(document.path) if document.path else "")
+        self._update_send_target()
+        if not self._closing:
+            self.root.title(f"{marker}{document.name} — Hyena Control")
 
     def _add_recent(self, p):
         recent = [x for x in self.cfg.get("recent", []) if x != p]
@@ -1567,15 +1819,26 @@ class App:
                 self.capture = None
 
     def _on_close(self):
-        if self._closing or not self._confirm_discard():
+        if self._closing or self._confirming_close:
             return
+        # Resolve every decision before removing any tab or disconnecting the robot.
+        # Native dialogs run nested event loops: block reentrant close/new/open shortcuts.
+        self._confirming_close = True
+        try:
+            for document in list(self.documents):
+                if not self._confirm_discard(document):
+                    return
+        finally:
+            self._confirming_close = False
         self._save_config()
         self._closing = True
-        self.editor.configure(state="disabled")
+        for document in self.documents:
+            document.editor.configure(state="disabled")
+            if document.highlight_job:
+                self.root.after_cancel(document.highlight_job)
+                document.highlight_job = None
         if self._poll_job:
             self.root.after_cancel(self._poll_job)
-        if self._hl_job:
-            self.root.after_cancel(self._hl_job)
         if self.serial_stop:
             self.serial_stop.set()
         self.root.title("Hyena Control — جاري إغلاق الاتصال...")
@@ -1641,7 +1904,7 @@ class RaceGenWindow:
         bar = ttk.Frame(self.win, padding=10)
         bar.pack(fill="x")
         ttk.Button(bar, text="حفظ كملف...", command=self.save).pack(side="left", padx=4)
-        ttk.Button(bar, text="نسخ للمحرر", command=self.to_editor).pack(side="left", padx=4)
+        ttk.Button(bar, text="فتح في تبويب جديد", command=self.to_editor).pack(side="left", padx=4)
         ttk.Button(bar, text="تحديث من الكونسول", command=self.refresh).pack(side="left", padx=4)
         ttk.Button(bar, text="إغلاق", command=self.win.destroy).pack(side="right", padx=4)
 
@@ -1690,7 +1953,7 @@ class RaceGenWindow:
         return bool(self.preview.get("1.0", "end-1c").strip())
 
     def save(self):
-        if not self._preview_current():
+        if self.app._closing or self.app._confirming_close or not self._preview_current():
             return
         p = filedialog.asksaveasfilename(
             title="حفظ برنامج السباق", defaultextension=".py",
@@ -1698,6 +1961,9 @@ class RaceGenWindow:
             initialdir=(os.path.dirname(self.app.current_path) if self.app.current_path else APP_DIR),
             initialfile="race_" + time.strftime("%H%M%S") + ".py")
         if not p or not self._preview_current():
+            return
+        if self.app._find_document(p) is not None:
+            messagebox.showerror("ملف مفتوح", "هذا الملف مفتوح في تبويب؛ افتح نتيجة السباق في تبويب جديد واحفظها باسم مختلف.")
             return
         try:
             atomic_write(p, self.preview.get("1.0", "end-1c"))
@@ -1707,22 +1973,13 @@ class RaceGenWindow:
             messagebox.showerror("خطأ", f"تعذر الحفظ:\n{e}")
 
     def to_editor(self):
-        if not self._preview_current() or not self.app._confirm_discard():
-            return
-        # The confirmation dialog runs a nested Tk event loop.
-        if not self._preview_current():
+        if not self._preview_current() or self.app._closing:
             return
         content = self.preview.get("1.0", "end-1c")
-        if not content.strip():
-            return
-        self.app.editor.delete("1.0", "end")
-        self.app.editor.insert("1.0", content)
-        self.app.current_path = None
-        self.app._saved_text = ""
-        self.app.editor.edit_modified(True)
-        self.app._set_file_label()
-        self.win.destroy()
-        self.app.editor.focus_set()
+        document = self.app._new_document(content, saved=False,
+                                           suggested_name="race_" + time.strftime("%H%M%S") + ".py")
+        if document is not None:
+            self.win.destroy()
 
 
 # ---------------------------------------------------------------------------
