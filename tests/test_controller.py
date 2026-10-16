@@ -2,6 +2,7 @@
 import asyncio
 import importlib
 from pathlib import Path
+import os
 import sys
 import tempfile
 import threading
@@ -10,6 +11,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from spike_core import EventQueue, MAX_LINE_BYTES
+from spike_documents import EditorDocument
 
 try:
     import tkinter  # noqa: F401
@@ -32,7 +34,12 @@ def tearDownModule():
 class Editor:
     def __init__(self, text='robot.straight(100)', dirty=True):
         self.text, self.dirty = text, dirty
-    def get(self, *args): return self.text
+    def get(self, *args):
+        if len(args) == 2 and str(args[1]).endswith('.end'):
+            line = int(str(args[0]).split('.')[0])
+            lines = self.text.split('\n')
+            return lines[line - 1] if line <= len(lines) else ''
+        return self.text
     def edit_modified(self, value=None):
         if value is not None: self.dirty = value
         return self.dirty
@@ -41,16 +48,64 @@ class Editor:
     def insert(self, index, value, *tags): self.text += value
     def focus_set(self): pass
     def yview(self): return (0.0, 1.0)
-    def index(self, *args): return f'{len(self.text.splitlines()) + 1}.0'
+    def index(self, *args):
+        if args == ('insert',): return getattr(self, 'cursor', '1.0')
+        return f'{len(self.text.splitlines()) + 1}.0'
     def see(self, *args): pass
+    def configure(self, **kwargs): pass
+    def yview_moveto(self, *args): pass
+    def tag_remove(self, *args): pass
+    def tag_add(self, *args): pass
+
+
+class Notebook:
+    def __init__(self):
+        self.frames = []
+        self.selected = None
+        self.options = {}
+    def add(self, frame, **kwargs):
+        self.frames.append(frame)
+        self.options[frame] = kwargs
+        if self.selected is None: self.selected = frame
+    def select(self, frame=None):
+        if frame is not None: self.selected = frame
+        return str(self.selected) if self.selected is not None else ''
+    def tab(self, frame, **kwargs): self.options[frame].update(kwargs)
+    def forget(self, frame):
+        self.frames.remove(frame)
+        self.options.pop(frame)
+        if self.selected is frame:
+            self.selected = self.frames[0] if self.frames else None
 
 
 def app_fixture():
     app = controller.App.__new__(controller.App)
     app.root = MagicMock()
-    app.editor = Editor()
+    app.documents = []
+    app.active_document = None
+    app._untitled_counter = 1
+    app._sending_path = None
+    app._send_op_id = None
+    app._pressed_close = None
+    app.notebook = Notebook()
+    def create_tab(content, path, saved, number, suggested_name):
+        return EditorDocument(MagicMock(), Editor(content, False), MagicMock(), MagicMock(),
+                              path, content if saved else '', number, suggested_name)
+    app._create_editor_tab = create_tab
+    initial = EditorDocument(MagicMock(), Editor(), MagicMock(), MagicMock(), 'training.py', 'old')
+    app.documents.append(initial)
+    app.active_document = initial
+    app.notebook.add(initial.frame)
     app.console_w = Editor('')
     app.lbl_file = MagicMock()
+    app.lbl_send_target = MagicMock()
+    app.file_path_var = MagicMock()
+    app._arabic_preview_visible = True
+    app._arabic_preview_state = None
+    app._arabic_preview_source = ''
+    app.arabic_preview = Editor('')
+    app.arabic_preview_frame = MagicMock()
+    app.arabic_preview_heading = MagicMock()
     app.lbl_rx = MagicMock()
     app.lbl_state = MagicMock()
     app.lbl_prog = MagicMock()
@@ -68,6 +123,7 @@ def app_fixture():
     app._hl_job = None
     app._poll_job = None
     app._closing = False
+    app._confirming_close = False
     app.serial_stop = threading.Event()
     app.serial_running = False
     app.serial_thread = None
@@ -134,10 +190,17 @@ class DocumentTests(unittest.TestCase):
         with patch.object(controller.filedialog, 'asksaveasfilename', return_value=''):
             self.assertIsNone(self.app._require_saved_file())
 
-    def test_recent_open_respects_discard_refusal(self):
-        self.box.askyesno.return_value = False
-        self.assertFalse(self.app._open_path('anything.py'))
-        self.assertEqual(self.app.editor.text, 'robot.straight(100)')
+    def test_open_creates_tab_without_discarding_current_edits(self):
+        previous = self.app.active_document
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'other.py'
+            path.write_text('print(123)', encoding='utf-8')
+            self.assertTrue(self.app._open_path(str(path)))
+        self.assertIn(previous, self.app.documents)
+        self.assertEqual(previous.editor.text, 'robot.straight(100)')
+        self.assertTrue(previous.dirty)
+        self.assertEqual(len(self.app.documents), 2)
+        self.box.askyesnocancel.assert_not_called()
 
     def test_copy_race_becomes_unsaved_document(self):
         race = controller.RaceGenWindow.__new__(controller.RaceGenWindow)
@@ -151,14 +214,85 @@ class DocumentTests(unittest.TestCase):
         self.assertTrue(self.app._editor_dirty())
         self.assertEqual(self.app.editor.text, 'robot.turn(90)')
 
-    def test_copy_race_respects_discard_refusal(self):
+    def test_copy_race_preserves_existing_file_without_discard_prompt(self):
+        previous = self.app.active_document
         race = controller.RaceGenWindow.__new__(controller.RaceGenWindow)
         race.app, race.preview, race.win = self.app, Editor('new'), MagicMock()
         race.preview_snapshot = self.app._training_snapshot()
-        self.box.askyesno.return_value = False
         race.to_editor()
+        self.assertEqual(previous.path, 'training.py')
+        self.assertEqual(previous.editor.text, 'robot.straight(100)')
+        self.assertIn(previous, self.app.documents)
+        self.assertIsNone(self.app.current_path)
+        self.box.askyesnocancel.assert_not_called()
+
+    def test_open_file_updates_header_window_title_and_copyable_path(self):
+        self.box.askyesno.return_value = True
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'training.py'
+            path.write_text('print("ready")', encoding='utf-8')
+            self.assertTrue(self.app._open_path(str(path)))
+        self.app.lbl_file.configure.assert_called_with(text='training.py')
+        self.app.root.title.assert_called_with('training.py — Hyena Control')
+        self.app.file_path_var.set.assert_called_with(os.path.abspath(path))
+
+    def test_open_arabic_filename_shapes_header_but_not_title_or_path(self):
+        self.box.askyesno.return_value = True
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'تدريب الروبوت.py'
+            path.write_text('print("ready")', encoding='utf-8')
+            self.assertTrue(self.app._open_path(str(path)))
+        self.app.lbl_file.configure.assert_called_with(text=controller.to_visual(path.name))
+        self.app.root.title.assert_called_with(f'{path.name} — Hyena Control')
+        self.app.file_path_var.set.assert_called_with(os.path.abspath(path))
+
+    def test_saving_as_new_filename_updates_all_document_displays(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'new-name.py'
+            self.assertTrue(self.app._save_to(str(path)))
+        self.app.lbl_file.configure.assert_called_with(text='new-name.py')
+        self.app.root.title.assert_called_with('new-name.py — Hyena Control')
+        self.app.file_path_var.set.assert_called_with(os.path.abspath(path))
+
+    def test_dirty_marker_is_shown_in_header_and_window_title(self):
+        self.app._set_file_label()
+        self.app.lbl_file.configure.assert_called_with(text='* training.py')
+        self.app.root.title.assert_called_with('* training.py — Hyena Control')
+
+    def test_new_document_clears_previous_filename_and_path(self):
+        self.box.askyesno.return_value = True
+        self.app.action_new()
+        self.app.lbl_file.configure.assert_called_with(text=controller.to_visual('بدون اسم 2'))
+        self.app.root.title.assert_called_with('بدون اسم 2 — Hyena Control')
+        self.app.file_path_var.set.assert_called_with('')
+
+    def test_cancelled_open_keeps_document_identity(self):
+        self.app._set_file_label()
+        self.app.root.title.reset_mock()
+        self.app.file_path_var.set.reset_mock()
+        with patch.object(controller.filedialog, 'askopenfilename', return_value=''):
+            self.app.action_open()
+        self.app.root.title.assert_not_called()
+        self.app.file_path_var.set.assert_not_called()
         self.assertEqual(self.app.current_path, 'training.py')
-        self.assertEqual(self.app.editor.text, 'robot.straight(100)')
+
+    def test_open_failure_keeps_previous_document_identity(self):
+        self.box.askyesno.return_value = True
+        with patch('builtins.open', side_effect=OSError('unreadable')):
+            self.assertFalse(self.app._open_path('missing.py'))
+        self.app.root.title.assert_not_called()
+        self.app.file_path_var.set.assert_not_called()
+        self.assertEqual(self.app.current_path, 'training.py')
+
+    def test_copy_race_replaces_document_identity_with_unsaved_file(self):
+        race = controller.RaceGenWindow.__new__(controller.RaceGenWindow)
+        race.app, race.preview, race.win = self.app, Editor('robot.turn(90)'), MagicMock()
+        race.preview_snapshot = self.app._training_snapshot()
+        self.box.askyesno.return_value = True
+        race.to_editor()
+        self.app.lbl_file.configure.assert_called_with(text='* ' + controller.to_visual(self.app.active_document.name))
+        self.app.root.title.assert_called_with(f'* {self.app.active_document.name} — Hyena Control')
+        self.app.file_path_var.set.assert_called_with('')
 
 
 class TrainingTests(unittest.TestCase):
@@ -282,15 +416,15 @@ class TrainingTests(unittest.TestCase):
             race.save()
         write.assert_not_called()
 
-    def test_discard_dialog_receiving_new_data_does_not_replace_editor(self):
+    def test_race_new_tab_keeps_training_editor_intact(self):
         race = self.make_race()
-        original = self.app.editor.text
-        def confirm(*args, **kwargs):
-            self.app.console('robot.straight(100)', 'out')
-            return True
-        self.box.askyesno.side_effect = confirm
+        original_document = self.app.active_document
+        original = original_document.editor.text
         race.to_editor()
-        self.assertEqual(self.app.editor.text, original)
+        self.assertEqual(original_document.editor.text, original)
+        self.assertIn(original_document, self.app.documents)
+        self.assertIsNot(self.app.active_document, original_document)
+        self.box.askyesnocancel.assert_not_called()
 
     def test_expected_disconnect_preserves_complete_training(self):
         hub = self.app.hub = object()
