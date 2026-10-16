@@ -30,16 +30,32 @@ import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+# مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(APP_DIR, "spike_controller_config.json")
+LOG_DIR = os.path.join(APP_DIR, "logs")
+
+# عند التشغيل بـ pythonw (start.bat بدون نافذة كونسول) تكون stdout/stderr
+# = None، فيتعطل شريط تقدم الرفع داخل pybricksdev (None.write).
+# نهيّئهما لملف سجل حتى يعمل الإرسال في كلتا الحالتين.
+if sys.stdout is None or sys.stderr is None:
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        _f = open(os.path.join(LOG_DIR, "app_console.log"), "a",
+                  encoding="utf-8", buffering=1)
+        if sys.stdout is None:
+            sys.stdout = _f
+        if sys.stderr is None:
+            sys.stderr = _f
+    except Exception:
+        pass
+
 # ترميز UTF-8 للكونسول (ويندوز cp1252 يكسر النصوص العربية)
 for _s in (sys.stdout, sys.stderr):
     try:
         _s.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-
-APP_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILE = os.path.join(APP_DIR, "spike_controller_config.json")
-LOG_DIR = os.path.join(APP_DIR, "logs")
 
 DEFAULTS = {
     "geometry": "1220x780",
