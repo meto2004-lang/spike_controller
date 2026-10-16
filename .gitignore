@@ -1,0 +1,4 @@
+__pycache__/
+logs/
+spike_controller_config.json
+*.pyc
