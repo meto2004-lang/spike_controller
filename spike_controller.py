@@ -571,12 +571,22 @@ class App:
             self.console_w.bind(event, lambda e: "break")
         self.console_w.bind("<Button-3>", self._console_menu)
 
-        try:
-            self.paned.sashpos(0, int(self.cfg.get("sash", 440)))
-        except Exception:
-            pass
-
+        # Restore after real geometry is known; the taller toolbar must not
+        # squeeze the editor down to a few pixels at the minimum window size.
+        self._sash_restored = False
+        self.paned.bind("<Configure>", self._layout_panes)
         self._set_file_label()
+
+    def _layout_panes(self, event):
+        if self._closing or event.height < 200:
+            return
+        console_min = max(100, min(160, round(event.height * 0.3)))
+        upper = event.height - console_min
+        lower = min(200, upper)
+        requested = (int(self.cfg.get("sash", 440)) if not self._sash_restored
+                     else self.paned.sashpos(0))
+        self._sash_restored = True
+        self.paned.sashpos(0, max(lower, min(requested, upper)))
 
     def _build_toolbar(self):
         """Group controls without changing their commands or safety states."""

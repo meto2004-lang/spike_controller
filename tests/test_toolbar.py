@@ -87,6 +87,26 @@ class ToolbarStateTests(unittest.TestCase):
         for name in ('_build_arabic_preview', '_toggle_arabic_preview', '_update_arabic_preview', '_copy_arabic_preview'):
             self.assertFalse(hasattr(controller.App, name))
 
+    def test_small_window_reserves_useful_editor_and_console_space(self):
+        app = app_fixture()
+        app._sash_restored = False
+        app.paned = MagicMock()
+        app.cfg['sash'] = 440
+        event = MagicMock(height=310)
+        app._layout_panes(event)
+        app.paned.sashpos.assert_called_with(0, 210)
+        self.assertTrue(app._sash_restored)
+
+    def test_resize_keeps_user_divider_position_when_it_fits(self):
+        app = app_fixture()
+        app._sash_restored = True
+        app.paned = MagicMock()
+        app.paned.sashpos.return_value = 260
+        app.cfg['sash'] = 440
+        app._layout_panes(MagicMock(height=700))
+        app.paned.sashpos.assert_called_with(0, 260)
+        self.assertEqual(app.cfg['sash'], 440)
+
 
 if __name__ == '__main__':
     unittest.main()
