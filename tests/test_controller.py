@@ -100,12 +100,7 @@ def app_fixture():
     app.lbl_file = MagicMock()
     app.lbl_send_target = MagicMock()
     app.file_path_var = MagicMock()
-    app._arabic_preview_visible = True
-    app._arabic_preview_state = None
-    app._arabic_preview_source = ''
-    app.arabic_preview = Editor('')
-    app.arabic_preview_frame = MagicMock()
-    app.arabic_preview_heading = MagicMock()
+    app._toolbar_images = {'serial': ('serial-image',), 'stop': ('stop-image',)}
     app.lbl_rx = MagicMock()
     app.lbl_state = MagicMock()
     app.lbl_prog = MagicMock()

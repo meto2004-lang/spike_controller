@@ -36,6 +36,7 @@ from tkinter import filedialog, messagebox, ttk
 from spike_core import (MAX_LINES, MAX_LINE_BYTES, MAX_HUB_LOG_BYTES,
                         EventQueue, atomic_write, training_line, validated_config)
 from spike_documents import EditorDocument, canonical_path, tab_names
+from spike_icons import ICON_PATHS, icon_pixels
 from spike_transfer import (TransferFailure, configure_ble_upload, needs_fresh_status,
                             trace_upload_writes, transfer_environment, wait_hub_idle)
 
@@ -83,7 +84,6 @@ except Exception:
     RTL_OK = False
 
 _AR_RE = re.compile(r"[\u0600-\u06FF\u0750-\u077F]")
-ARABIC_PREVIEW_LIMIT = 2000
 
 
 def to_visual(text: str) -> str:
@@ -151,7 +151,7 @@ HELP_TEXT = """\
 
 1) الاتصال:
    - شغّل الروبوت (يرمش أزرق) وقرّبه من اللابتوب
-   - اضغط «اتصال» — يعيد المحاولة تلقائياً حتى يظهر الروبوت
+   - اضغط «بلوتوث» — يعيد المحاولة تلقائياً حتى يظهر الروبوت
    - عند الاتصال تظهر الفرموير في شريط الحالة
 
 2) إرسال وتشغيل:
@@ -187,13 +187,7 @@ HELP_TEXT = """\
    Ctrl+L جلسة جديدة ومسح البيانات
    Ctrl+Shift+C نسخ المحدد من الكونسول (أو زر يمين في الكونسول)
 
-7) العربية داخل الكود:
-   - تعرض لوحة المعاينة السطر الحالي بالعربية دون تغيير مصدر الكود
-   - تتحرك المعاينة مع المؤشر، وزر «معاينة العربية» يخفيها أو يظهرها
-   - «نسخ السطر الأصلي» ينسخ النص الأصلي لا النص المعاد تشكيله
-   - المعاينة للقراءة فقط؛ تحرير العربية في السطر نفسه ما زال محدوداً في Tk
-
-8) الكونسول:
+7) الكونسول:
    - حدّد أي نص بالفأرة وانسخه (Ctrl+C أو قائمة يمين)
    - الكونسول قراءة فقط — لا يُمسح بمجرد الضغط على المفاتيح
 """
@@ -323,9 +317,6 @@ class App:
         self._pressed_close = None
         self._sending_path = None
         self._send_op_id = None
-        self._arabic_preview_visible = True
-        self._arabic_preview_state = None
-        self._arabic_preview_source = ""
         self.rx_count = 0
         # نسخة خام من أسطر الكونسول (بلا تحويل العرض) لتستخدمها
         # أدوات التحليل: مولّد السباق وحفظ السجل — حتى لا تتأثر بالترتيب البصري
@@ -354,7 +345,7 @@ class App:
             self.console(f"تعذر تحميل pybricksdev: {PB_ERR}", "err")
             self.console("ثبّته بـ: python -m pip install -r requirements.txt", "info")
 
-        self.console("مرحباً — اضغط «اتصال» بعد تشغيل الروبوت (F1 للمساعدة)", "info")
+        self.console("مرحباً — اضغط «بلوتوث» بعد تشغيل الروبوت (F1 للمساعدة)", "info")
 
         if self.cfg.get("autoconnect"):
             self.root.after(500, self.action_connect)
@@ -453,6 +444,29 @@ class App:
         st.configure("TCheckbutton", background=self.BG, foreground=self.FG)
         st.map("TCheckbutton", background=[("active", self.BG)])
 
+        st.configure("Toolbar.TLabelframe", background=self.PANEL, bordercolor="#3b4052",
+                     borderwidth=1, relief="solid")
+        st.configure("Toolbar.TLabelframe.Label", background=self.PANEL, foreground="#c5cede",
+                     font=("Segoe UI", 10, "bold"))
+        st.configure("Toolbar.TFrame", background=self.PANEL)
+        st.configure("ToolbarCaption.TLabel", background=self.PANEL, foreground="#a9b4c8",
+                     font=("Segoe UI", 9))
+        st.configure("Toolbar.TButton", background="#34394b", foreground=self.FG,
+                     bordercolor="#454d64", borderwidth=1, padding=(10, 7),
+                     font=("Segoe UI", 10), anchor="center", relief="flat")
+        st.map("Toolbar.TButton",
+               background=[("disabled", "#2a2d39"), ("pressed", "#272e42"), ("active", "#46516c")],
+               foreground=[("disabled", "#70788d")],
+               bordercolor=[("focus", self.ACCENT), ("active", "#66769c")])
+        st.configure("Primary.Toolbar.TButton", background="#346bd5", foreground="#ffffff",
+                     bordercolor="#5286e6")
+        st.map("Primary.Toolbar.TButton",
+               background=[("disabled", "#293651"), ("pressed", "#2857b1"), ("active", "#447ff0")])
+        st.configure("Stop.Toolbar.TButton", background="#733440", foreground="#fff1f3",
+                     bordercolor="#a64b5c")
+        st.map("Stop.Toolbar.TButton",
+               background=[("disabled", "#3c2c35"), ("pressed", "#6b2534"), ("active", "#a14358")])
+
     def _build_ui(self) -> None:
         self.root.title("Hyena Control — تحكم روبوت SPIKE Prime (Pybricks)")
         try:
@@ -463,51 +477,7 @@ class App:
 
         self._build_menu()
 
-        # ---- شريط الأدوات ----
-        bar = ttk.Frame(self.root, padding=(8, 6))
-        bar.pack(side="top", fill="x")
-
-        self.btn_connect = ttk.Button(bar, text="اتصال", command=self.action_connect)
-        self.btn_connect.pack(side="left", padx=2)
-        self.btn_disconnect = ttk.Button(bar, text="قطع الاتصال", command=self.action_disconnect)
-        self.btn_disconnect.pack(side="left", padx=2)
-
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y", padx=8)
-
-        self.btn_usb = ttk.Button(bar, text="اتصال بالسلك ▶", command=self.action_usb_connect)
-        self.btn_usb.pack(side="left", padx=2)
-        self.btn_serial = ttk.Button(bar, text="بث السلك ▶", command=self.action_serial_toggle)
-        self.btn_serial.pack(side="left", padx=2)
-        ttk.Label(bar, text="اسم / عنوان الروبوت:").pack(side="left", padx=(12, 2))
-        self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
-        ttk.Entry(bar, textvariable=self.target_var, width=18).pack(side="left", padx=2)
-
-        bar = ttk.Frame(self.root, padding=(8, 2))
-        bar.pack(side="top", fill="x")
-
-        self.btn_send = ttk.Button(bar, text="إرسال وتشغيل ▶", style="Accent.TButton",
-                                   command=self.action_send_run)
-        self.btn_send.pack(side="left", padx=2)
-        self.btn_sendwait = ttk.Button(bar, text="إرسال مع الانتظار ⏳",
-                                       command=self.action_send_wait)
-        self.btn_sendwait.pack(side="left", padx=2)
-        self.btn_dl = ttk.Button(bar, text="تحميل فقط ⤓", command=self.action_download_only)
-        self.btn_dl.pack(side="left", padx=2)
-        self.btn_stored = ttk.Button(bar, text="تشغيل المخزن ↺", command=self.action_run_stored)
-        self.btn_stored.pack(side="left", padx=2)
-        self.btn_stop = ttk.Button(bar, text="إيقاف ■", style="Danger.TButton",
-                                   command=self.action_stop)
-        self.btn_stop.pack(side="left", padx=2)
-
-        bar = ttk.Frame(self.root, padding=(8, 2))
-        bar.pack(side="top", fill="x")
-
-        self.btn_race = ttk.Button(bar, text="توليد ملف سباق ⚙", command=self.action_race_gen)
-        self.btn_race.pack(side="left", padx=2)
-        self.btn_clear = ttk.Button(bar, text="جلسة جديدة / مسح", command=self.action_clear_console)
-        self.btn_clear.pack(side="left", padx=2)
-        self.btn_export = ttk.Button(bar, text="تصدير السجل", command=self.action_export_log)
-        self.btn_export.pack(side="left", padx=2)
+        self._build_toolbar()
 
         # Reserve a full row so the in-flight target cannot be squeezed by buttons.
         self.lbl_send_target = ttk.Label(self.root, text="", width=1, anchor="w",
@@ -551,8 +521,6 @@ class App:
         ttk.Button(document_header, text="+", width=3, command=self.action_new).grid(row=0, column=1)
         ttk.Button(document_header, text=to_visual("إغلاق التبويب"),
                    command=self.action_close_tab).grid(row=0, column=2, padx=4)
-        ttk.Button(document_header, text=to_visual("معاينة العربية"),
-                   command=self._toggle_arabic_preview).grid(row=0, column=3)
         self.file_path_var = tk.StringVar(value="")
         self.file_path_entry = ttk.Entry(ed_frame, textvariable=self.file_path_var,
                                          state="readonly", takefocus=True)
@@ -564,7 +532,6 @@ class App:
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
         self.notebook.bind("<ButtonPress-1>", self._tab_close_press, add="+")
         self.notebook.bind("<ButtonRelease-1>", self._tab_close_release, add="+")
-        self._build_arabic_preview(ed_frame)
         self._new_document()
 
         # كونسول
@@ -611,75 +578,86 @@ class App:
 
         self._set_file_label()
 
-    # Display-only projection: never reshape text in an editable document.
-    def _build_arabic_preview(self, parent):
-        self.arabic_preview_frame = ttk.Frame(parent)
-        header = ttk.Frame(self.arabic_preview_frame)
-        header.pack(fill="x")
-        header.columnconfigure(0, weight=1)
-        self.arabic_preview_heading = ttk.Label(header, width=1, style="Header.TLabel")
-        self.arabic_preview_heading.grid(row=0, column=0, sticky="ew")
-        ttk.Button(header, text=to_visual("نسخ السطر الأصلي"),
-                   command=self._copy_arabic_preview).grid(row=0, column=1)
-        body = ttk.Frame(self.arabic_preview_frame)
-        body.pack(fill="x")
-        self.arabic_preview = tk.Text(
-            body, height=2, wrap="word", border=0, state="disabled", takefocus=False,
-            exportselection=False, font=("Segoe UI", 11), bg=self.PANEL, fg=self.FG,
-            padx=6, pady=3, cursor="arrow")
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.arabic_preview.yview)
-        self.arabic_preview.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        self.arabic_preview.pack(side="left", fill="both", expand=True)
-        # Never let the preview export presentation-form characters to code.
-        for sequence in ("<<Copy>>", "<<Cut>>", "<Control-c>", "<Control-x>"):
-            self.arabic_preview.bind(sequence, lambda e: self._copy_arabic_preview())
-        self.arabic_preview.bind("<Button-3>", self._arabic_preview_menu)
+    def _build_toolbar(self):
+        """Group controls without changing their commands or safety states."""
+        self.toolbar = ttk.Frame(self.root, padding=(8, 6, 8, 4))
+        self.toolbar.pack(side="top", fill="x")
+        self.toolbar.columnconfigure(0, weight=3, uniform="toolbar")
+        self.toolbar.columnconfigure(1, weight=2, uniform="toolbar")
+        self.toolbar_groups = {}
+        for key, title, row, column, span in (
+                ("connection", "الاتصال بالروبوت", 0, 0, 2),
+                ("program", "البرامج والتشغيل", 1, 0, 1),
+                ("training", "التدريب والسجلات", 1, 1, 1)):
+            frame = ttk.LabelFrame(self.toolbar, text=to_visual(title),
+                                   style="Toolbar.TLabelframe", padding=(8, 6))
+            frame.grid(row=row, column=column, columnspan=span, sticky="nsew",
+                       padx=(0, 8) if key == "program" else 0,
+                       pady=(0, 6) if row == 0 else 0)
+            self.toolbar_groups[key] = frame
+        self._build_toolbar_icons()
+        connection = self.toolbar_groups["connection"]
+        for column in range(4):
+            connection.columnconfigure(column, weight=1, uniform="connection")
+        connection.columnconfigure(4, weight=2, uniform="connection")
+        self.btn_connect = self._toolbar_button(connection, "بلوتوث", "bluetooth", self.action_connect, 0, 0)
+        self.btn_disconnect = self._toolbar_button(connection, "قطع الاتصال", "disconnect", self.action_disconnect, 0, 1)
+        self.btn_usb = self._toolbar_button(connection, "اتصال USB", "usb", self.action_usb_connect, 0, 2)
+        self.btn_serial = self._toolbar_button(connection, "استقبال COM", "serial", self.action_serial_toggle, 0, 3)
+        target = ttk.Frame(connection, style="Toolbar.TFrame")
+        target.grid(row=0, column=4, sticky="ew", padx=(8, 2))
+        ttk.Label(target, text=to_visual("اسم الروبوت / عنوان BLE"), anchor="e",
+                  style="ToolbarCaption.TLabel").pack(fill="x", pady=(0, 2))
+        self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
+        self.target_entry = ttk.Entry(target, textvariable=self.target_var, width=1)
+        self.target_entry.pack(fill="x")
 
-    def _arabic_preview_menu(self, event):
-        menu = tk.Menu(self.root, tearoff=0)
-        menu.add_command(label=to_visual("نسخ السطر الأصلي"), command=self._copy_arabic_preview)
-        menu.tk_popup(event.x_root, event.y_root)
+        program = self.toolbar_groups["program"]
+        for column in range(3):
+            program.columnconfigure(column, weight=1, uniform="program")
+        self.btn_send = self._toolbar_button(program, "إرسال وتشغيل", "play", self.action_send_run, 0, 0,
+                                             style="Primary.Toolbar.TButton")
+        self.btn_sendwait = self._toolbar_button(program, "إرسال مع الانتظار", "wait", self.action_send_wait, 0, 1)
+        self.btn_dl = self._toolbar_button(program, "تحميل فقط", "download", self.action_download_only, 0, 2)
+        self.btn_stored = self._toolbar_button(program, "تشغيل المخزن", "stored", self.action_run_stored, 1, 0, span=2)
+        self.btn_stop = self._toolbar_button(program, "إيقاف", "stop", self.action_stop, 1, 2,
+                                             style="Stop.Toolbar.TButton")
 
-    def _copy_arabic_preview(self):
-        # Copy the complete logical line, even if the displayed preview is clipped.
-        if self._arabic_preview_source:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(self._arabic_preview_source)
-        return "break"
+        training = self.toolbar_groups["training"]
+        for column in range(2):
+            training.columnconfigure(column, weight=1, uniform="training")
+        self.btn_race = self._toolbar_button(training, "توليد ملف سباق", "race", self.action_race_gen, 0, 0, span=2)
+        self.btn_clear = self._toolbar_button(training, "جلسة جديدة", "new", self.action_clear_console, 1, 0)
+        self.btn_export = self._toolbar_button(training, "تصدير السجل", "export", self.action_export_log, 1, 1)
+        self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_usb, self.btn_serial,
+                                self.btn_send, self.btn_sendwait, self.btn_dl, self.btn_stored,
+                                self.btn_stop, self.btn_race, self.btn_clear, self.btn_export)
 
-    def _toggle_arabic_preview(self):
-        self._arabic_preview_visible = not self._arabic_preview_visible
-        self._arabic_preview_state = None
-        self._update_arabic_preview()
+    def _build_toolbar_icons(self):
+        # Pixel glyphs avoid missing emoji/symbol fonts and scale with Tk's DPI.
+        size = max(16, min(32, round(18 * float(self.root.tk.call("tk", "scaling")) / (96 / 72))))
+        self._toolbar_images = {}
+        for name in ICON_PATHS:
+            pair = []
+            for color in ("#f1f4fc", "#70788d"):
+                image = tk.PhotoImage(master=self.root, width=size, height=size)
+                for x, y in icon_pixels(name, size):
+                    image.put(color, (x, y))
+                pair.append(image)
+            # Hold Python references and provide a muted disabled-state image.
+            self._toolbar_images[name] = (pair[0], "disabled", pair[1])
 
-    def _update_arabic_preview(self, document=None):
-        document = document or self.active_document
-        if self._closing or document is not self.active_document or document not in self.documents:
-            return
-        if not self._arabic_preview_visible:
-            self.arabic_preview_frame.pack_forget()
-            return
-        line = document.editor.index("insert").split(".")[0]
-        source = document.editor.get(f"{line}.0", f"{line}.end")
-        state = (document, line, source, RTL_OK)
-        if state == self._arabic_preview_state:
-            return
-        self._arabic_preview_state = state
-        self._arabic_preview_source = source
-        # Pack before the expanding notebook so the preview remains visible.
-        self.arabic_preview_frame.pack(side="bottom", fill="x", pady=(4, 0), before=self.notebook)
-        heading = (to_visual(f"معاينة السطر {line} — للعرض فقط؛ النسخ يعطي السطر الأصلي") if RTL_OK
-                   else f"Line {line}: Arabic preview needs requirements.txt (source unchanged)")
-        self.arabic_preview_heading.configure(text=heading)
-        display = to_visual(source[:ARABIC_PREVIEW_LIMIT])
-        if len(source) > ARABIC_PREVIEW_LIMIT:
-            display += "\n" + to_visual("… المعاينة مختصرة؛ النسخ يشمل السطر كاملًا")
-        self.arabic_preview.configure(state="normal")
-        self.arabic_preview.delete("1.0", "end")
-        self.arabic_preview.insert("1.0", display)
-        self.arabic_preview.configure(state="disabled")
-        self.arabic_preview.yview_moveto(0)
+    def _toolbar_button(self, parent, title, icon, command, row, column, *, span=1,
+                        style="Toolbar.TButton"):
+        button = ttk.Button(parent, text=to_visual(title), image=self._toolbar_images[icon],
+                            compound="left", width=1, style=style, command=command)
+        button.grid(row=row, column=column, columnspan=span, sticky="ew", padx=3, pady=3)
+        return button
+
+    def _sync_serial_button(self):
+        title = "إيقاف COM" if self.serial_running else "استقبال COM"
+        icon = "stop" if self.serial_running else "serial"
+        self.btn_serial.configure(text=to_visual(title), image=self._toolbar_images[icon])
 
     def _ts_var(self):
         if not hasattr(self, "_v_ts"):
@@ -854,8 +832,6 @@ class App:
         editor.edit_modified(False)
         editor.bind("<<Modified>>", lambda e: self._on_editor_modified(e, document))
         editor.bind("<Button-3>", self._editor_menu)
-        for sequence in ("<KeyRelease>", "<ButtonRelease-1>", "<FocusIn>", "<<Selection>>"):
-            editor.bind(sequence, lambda e: self._update_arabic_preview(document), add="+")
         for sequence, action in self._shortcut_bindings().items():
             editor.bind(sequence, lambda e, a=action: self._run_shortcut(a))
         return document
@@ -1208,8 +1184,7 @@ class App:
             if msg[2] is not self.serial_stop:
                 return
             self.serial_running = bool(msg[1])
-            self.btn_serial.configure(
-                text="بث السلك ■" if self.serial_running else "بث السلك ▶")
+            self._sync_serial_button()
         elif kind in ("op_done", "op_error"):
             _, op_id, name, res, err = msg
             self._operations.pop(op_id, None)
@@ -1262,7 +1237,7 @@ class App:
 
     def _hub_or_raise(self):
         if self._worker_hub is None:
-            raise RuntimeError("غير متصل بالروبوت — اضغط «اتصال» أولاً")
+            raise RuntimeError("غير متصل بالروبوت — اضغط «بلوتوث» أولاً")
         return self._worker_hub
 
     async def op_connect(self, target=None):
@@ -1606,14 +1581,14 @@ class App:
             return
         stop = self.serial_stop = threading.Event()
         self.serial_running = True  # reserve before starting; a second click stops it
-        self.btn_serial.configure(text="بث السلك ■")
+        self._sync_serial_button()
         self.serial_thread = threading.Thread(target=self._serial_reader, args=(port, stop),
                                               name="serial-reader", daemon=True)
         try:
             self.serial_thread.start()
         except RuntimeError as exc:
             self.serial_running = False
-            self.btn_serial.configure(text="بث السلك ▶")
+            self._sync_serial_button()
             self.console(f"تعذر بدء قارئ السلك: {exc}", "err")
 
     def _find_hub_port(self):
@@ -1824,7 +1799,6 @@ class App:
         self.lbl_file.configure(text=marker + to_visual(document.name))
         self.file_path_var.set(os.path.abspath(document.path) if document.path else "")
         self._update_send_target()
-        self._update_arabic_preview(document)
         if not self._closing:
             self.root.title(f"{marker}{document.name} — Hyena Control")
 
