@@ -343,6 +343,23 @@ class TabControllerTests(unittest.TestCase):
         self.assertEqual(self.initial.editor.text, 'robot.straight(100)')
         self.box.showerror.assert_called_once()
 
+    def test_windows_bindings_avoid_x11_only_keysym_but_keep_reverse_cycle(self):
+        self.app.root.tk.call.return_value = 'win32'
+        second = self.app._new_document('other')
+        bindings = self.app._shortcut_bindings()
+        self.assertNotIn('<Control-ISO_Left_Tab>', bindings)
+        bindings['<Control-Shift-Tab>']()
+        self.assertIs(self.app.active_document, self.initial)
+        self.assertIn(second, self.app.documents)
+
+    def test_x11_bindings_include_reverse_tab_alias(self):
+        self.app.root.tk.call.return_value = 'x11'
+        self.app._new_document('other')
+        bindings = self.app._shortcut_bindings()
+        self.assertIn('<Control-ISO_Left_Tab>', bindings)
+        bindings['<Control-ISO_Left_Tab>']()
+        self.assertIs(self.app.active_document, self.initial)
+
 
 if __name__ == '__main__':
     unittest.main()

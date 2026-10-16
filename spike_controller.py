@@ -772,17 +772,21 @@ class App:
         self.root.config(menu=menubar)
 
     def _shortcut_bindings(self):
-        return {
+        bindings = {
             "<Control-n>": self.action_new, "<Control-o>": self.action_open,
             "<Control-s>": self.action_save, "<Control-S>": self.action_save_as,
             "<Control-w>": self.action_close_tab,
             "<Control-Tab>": lambda: self._cycle_document(1),
             "<Control-Shift-Tab>": lambda: self._cycle_document(-1),
-            "<Control-ISO_Left_Tab>": lambda: self._cycle_document(-1),
             "<Control-g>": self.action_race_gen, "<Control-l>": self.action_clear_console,
             "<F5>": self.action_send_run, "<Control-F5>": self.action_send_wait,
             "<Escape>": self.action_stop, "<F1>": self.action_help,
         }
+
+        # ISO_Left_Tab is an X11 alias; some Windows Tk builds reject it at bind time.
+        if self.root.tk.call("tk", "windowingsystem") == "x11":
+            bindings["<Control-ISO_Left_Tab>"] = lambda: self._cycle_document(-1)
+        return bindings
 
     def _run_shortcut(self, action):
         if not self._closing and not self._confirming_close:
