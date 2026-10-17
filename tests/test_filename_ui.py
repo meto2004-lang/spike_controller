@@ -188,55 +188,83 @@ class FilenameLayoutTests(unittest.TestCase):
         self.assertTrue(self.app.lbl_send_target.winfo_ismapped())
         self.assertGreater(self.app.lbl_send_target.winfo_width(), 700)
 
-    def test_arabic_preview_tracks_cursor_and_keeps_source_undo_and_save_intact(self):
-        source = 'robot.straight(100)  # التدريب قبل السباق\nprint("مرحبا بالعالم")\n'
+    def test_toolbar_is_grouped_and_no_controls_overlap_or_leave_the_window(self):
+        self.assertEqual(set(self.app.toolbar_groups), {'connection', 'program', 'training'})
+        self.assertEqual(len(self.app.toolbar_buttons), 12)
+        for width, height in ((900, 560), (1220, 780), (1600, 900)):
+            self.root.geometry(f'{width}x{height}')
+            self.root.update()
+            rectangles = []
+            for button in self.app.toolbar_buttons:
+                self.assertTrue(button.winfo_ismapped())
+                x = button.winfo_rootx() - self.root.winfo_rootx()
+                y = button.winfo_rooty() - self.root.winfo_rooty()
+                w, h = button.winfo_width(), button.winfo_height()
+                self.assertGreaterEqual(w, 80)
+                self.assertGreaterEqual(h, 28)
+                self.assertGreaterEqual(x, 0)
+                self.assertGreaterEqual(y, 0)
+                self.assertLessEqual(x + w, self.root.winfo_width())
+                self.assertLessEqual(y + h, self.root.winfo_height())
+                self.assertTrue(button.cget('image'))
+                rectangles.append((x, y, x + w, y + h))
+            for index, (left, top, right, bottom) in enumerate(rectangles):
+                for other_left, other_top, other_right, other_bottom in rectangles[index + 1:]:
+                    self.assertFalse(left < other_right and right > other_left and top < other_bottom and bottom > other_top)
+            self.assertGreater(self.app.target_entry.winfo_width(), 150)
+            self.assertGreater(self.app.editor.winfo_height(), 30)
+
+    def test_toolbar_labels_fit_and_danger_action_is_distinct(self):
+        from tkinter import font
+        style = controller.ttk.Style(self.root)
+        button_font = font.Font(root=self.root, font=style.lookup('Toolbar.TButton', 'font'))
+        for button in self.app.toolbar_buttons:
+            image_name = self.root.tk.splitlist(button.cget('image'))[0]
+            image_width = int(self.root.tk.call('image', 'width', image_name))
+            required = button_font.measure(button.cget('text')) + image_width + 24
+            self.assertGreaterEqual(button.winfo_width(), required, button.cget('text'))
+        self.assertEqual(self.app.btn_send.cget('style'), 'Primary.Toolbar.TButton')
+        self.assertEqual(self.app.btn_stop.cget('style'), 'Stop.Toolbar.TButton')
+        self.assertNotEqual(style.lookup('Primary.Toolbar.TButton', 'background'),
+                            style.lookup('Stop.Toolbar.TButton', 'background'))
+
+    def test_toolbar_invokes_existing_send_download_and_stop_commands(self):
+        self.open_file('toolbar.py')
+        self.app.connected = True
+        self.app.hub = object()
+        self.app._refresh_buttons()
+        self.app._start_op = MagicMock(return_value=True)
+        for button, operation in ((self.app.btn_send, 'send_run'), (self.app.btn_sendwait, 'send_wait'),
+                                  (self.app.btn_dl, 'download'), (self.app.btn_stored, 'run_stored'),
+                                  (self.app.btn_stop, 'stop')):
+            with self.subTest(operation=operation):
+                self.app._start_op.reset_mock()
+                button.invoke()
+                self.assertEqual(self.app._start_op.call_args.args[0], operation)
+
+    def test_disabled_upload_cannot_be_invoked_and_stop_stays_available_when_busy(self):
+        self.app._start_op = MagicMock()
+        self.app.btn_send.invoke()
+        self.app._start_op.assert_not_called()
+        self.app.connected, self.app.hub, self.app.busy = True, object(), True
+        self.app._refresh_buttons()
+        self.assertIn('disabled', self.app.btn_send.state())
+        self.assertNotIn('disabled', self.app.btn_stop.state())
+        self.app.btn_stop.invoke()
+        self.assertEqual(self.app._start_op.call_args.args[0], 'stop')
+
+    def test_only_file_tabs_remain_and_arabic_source_is_unmodified(self):
+        self.assertFalse(hasattr(self.app, 'arabic_preview'))
+        self.assertFalse(hasattr(self.app, 'arabic_preview_frame'))
+        source = 'print("مرحبا بالعالم")  # النص الأصلي\n'
         document = self.app._new_document(source)
-        document.editor.mark_set('insert', '1.4')
-        document.editor.event_generate('<<Selection>>')
         self.root.update()
-        self.assertEqual(self.app.arabic_preview.get('1.0', 'end-1c'),
-                         controller.to_visual(source.splitlines()[0]))
-        document.editor.mark_set('insert', '2.3')
-        document.editor.event_generate('<<Selection>>')
-        self.root.update()
-        self.assertEqual(self.app.arabic_preview.get('1.0', 'end-1c'),
-                         controller.to_visual(source.splitlines()[1]))
-        self.assertEqual(str(self.app.arabic_preview.cget('state')), 'disabled')
-        self.assertFalse(document.dirty)
-        self.assertFalse(document.editor.edit_modified())
         self.assertEqual(document.editor.get('1.0', 'end-1c'), source)
-        with self.assertRaises(tk.TclError):
-            document.editor.edit_undo()
-        path = self.directory / 'arabic-source.py'
+        self.assertFalse(document.dirty)
+        self.assertEqual(len(self.app.notebook.tabs()), len(self.app.documents))
+        path = self.directory / 'arabic.py'
         self.assertTrue(self.app._save_to(str(path)))
         self.assertEqual(path.read_bytes(), source.encode('utf-8'))
-
-    def test_preview_copy_exports_logical_line_not_presentation_forms(self):
-        source = 'message = "مرحبا بالعالم"  # تعليق عربي'
-        document = self.app._new_document(source)
-        self.root.update()
-        self.app.arabic_preview.tag_add('sel', '1.0', 'end')
-        self.app.arabic_preview.event_generate('<<Copy>>')
-        self.root.update()
-        self.assertEqual(self.root.clipboard_get(), source)
-        self.assertFalse(self.app.arabic_preview.cget('exportselection'))
-        self.assertEqual(document.editor.get('1.0', 'end-1c'), source)
-        self.assertFalse(document.dirty)
-
-    def test_preview_toggle_and_tab_switch_restore_correct_source(self):
-        first = self.app._new_document('# التعليق الأول')
-        second = self.app._new_document('# التعليق الثاني')
-        self.root.update()
-        self.assertEqual(self.app._arabic_preview_source, second.editor.get('1.0', 'end-1c'))
-        self.app._toggle_arabic_preview()
-        self.root.update()
-        self.assertFalse(self.app.arabic_preview_frame.winfo_ismapped())
-        self.app._select_document(first)
-        self.app._toggle_arabic_preview()
-        self.root.update()
-        self.assertTrue(self.app.arabic_preview_frame.winfo_ismapped())
-        self.assertGreater(self.app.arabic_preview.winfo_width(), 500)
-        self.assertEqual(self.app._arabic_preview_source, first.editor.get('1.0', 'end-1c'))
 
 
 if __name__ == '__main__':
