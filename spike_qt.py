@@ -212,6 +212,8 @@ class Root:
         self.cancel_timers()
         self.window.allow_close = True
         self.window.close()
+        for dialog in self.window.findChildren(QDialog):
+            dialog.close()
 
 
 class Dialogs:
