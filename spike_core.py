@@ -44,6 +44,9 @@ def validated_config(data, defaults: dict) -> dict:
     for key in ("timestamps", "autolog", "autoconnect"):
         if type(data.get(key)) is bool:
             cfg[key] = data[key]
+    fraction = data.get("editor_fraction")
+    if type(fraction) in (int, float) and 0.2 <= fraction <= 0.9 and math.isfinite(fraction):
+        cfg["editor_fraction"] = float(fraction)
     name = data.get("hub_name")
     if isinstance(name, str) and len(name) <= 128 and all(ord(c) >= 32 for c in name):
         cfg["hub_name"] = name.strip()

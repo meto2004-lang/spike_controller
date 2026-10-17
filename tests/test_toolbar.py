@@ -51,10 +51,11 @@ class ToolbarStateTests(unittest.TestCase):
                     setattr(app, 'btn_' + name, MagicMock())
                 controller.App._refresh_buttons(app)
                 app.btn_connect.configure.assert_called_with(state='disabled' if connected or busy else 'normal')
-                app.btn_usb.configure.assert_called_with(state='disabled' if connected or busy else 'normal')
+                self.assertIn(unittest.mock.call(app._action_entries['usb'][1], state='disabled' if connected or busy else 'normal'), app.options_menu.entryconfigure.call_args_list)
                 app.btn_disconnect.configure.assert_called_with(state='normal' if connected else 'disabled')
-                for button in (app.btn_send, app.btn_sendwait, app.btn_dl, app.btn_stored):
-                    button.configure.assert_called_with(state='normal' if connected and not busy else 'disabled')
+                app.btn_send.configure.assert_called_with(state='normal' if connected and not busy else 'disabled')
+                for key in ('sendwait', 'dl', 'stored'):
+                    self.assertIn(unittest.mock.call(app._action_entries[key][1], state='normal' if connected and not busy else 'disabled'), app.options_menu.entryconfigure.call_args_list)
                 app.btn_stop.configure.assert_called_with(state='normal' if connected or busy else 'disabled')
 
     def test_serial_label_and_icon_follow_running_state(self):
@@ -62,7 +63,7 @@ class ToolbarStateTests(unittest.TestCase):
         for running, title, icon in ((False, 'استقبال COM', 'serial'), (True, 'إيقاف COM', 'stop')):
             app.serial_running = running
             app._sync_serial_button()
-            app.btn_serial.configure.assert_called_with(text=controller.to_visual(title), image=app._toolbar_images[icon])
+            app.options_menu.entryconfigure.assert_called_with(app._action_entries['serial'][1], label=controller.to_visual(title), image=app._toolbar_images[icon][0])
 
     def test_serial_completion_updates_button_without_resetting_training(self):
         app = app_fixture()
@@ -71,7 +72,7 @@ class ToolbarStateTests(unittest.TestCase):
         app._handle_msg(('serial_state', False, app.serial_stop))
         self.assertFalse(app.serial_running)
         self.assertEqual(app.training_lines, ['robot.turn(90)'])
-        app.btn_serial.configure.assert_called_with(text=controller.to_visual('استقبال COM'), image=app._toolbar_images['serial'])
+        app.options_menu.entryconfigure.assert_called_with(app._action_entries['serial'][1], label=controller.to_visual('استقبال COM'), image=app._toolbar_images['serial'][0])
 
     def test_source_saving_preserves_raw_arabic_without_preview(self):
         app = app_fixture()
@@ -94,7 +95,7 @@ class ToolbarStateTests(unittest.TestCase):
         app.cfg['sash'] = 440
         event = MagicMock(height=310)
         app._layout_panes(event)
-        app.paned.sashpos.assert_called_with(0, 210)
+        app.paned.sashpos.assert_called_with(0, 230)
         self.assertTrue(app._sash_restored)
 
     def test_resize_keeps_user_divider_position_when_it_fits(self):

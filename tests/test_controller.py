@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from spike_core import EventQueue, MAX_LINE_BYTES
 from spike_documents import EditorDocument
+# Keep this shared module cached when the no-Tk import mock restores sys.modules.
+import spike_transfer  # noqa: F401
 
 try:
     import tkinter  # noqa: F401
@@ -99,6 +101,15 @@ def app_fixture():
     app.console_w = Editor('')
     app.lbl_file = MagicMock()
     app.lbl_send_target = MagicMock()
+    app.upload_bar = MagicMock()
+    app.lbl_upload = MagicMock()
+    app._upload_progress_id = None
+    app._upload_state = 'idle'
+    app._upload_percent = 0
+    app.options_menu = MagicMock()
+    app.tools_menu = MagicMock()
+    app._action_entries = {name: (app.options_menu, index) for index, name in
+                           enumerate(('usb', 'serial', 'sendwait', 'dl', 'stored'))}
     app.file_path_var = MagicMock()
     app._toolbar_images = {'serial': ('serial-image',), 'stop': ('stop-image',)}
     app.lbl_rx = MagicMock()
