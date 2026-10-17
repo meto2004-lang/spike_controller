@@ -6,7 +6,7 @@ import re
 import unicodedata
 
 from PySide6.QtCore import QMimeData, QPointF, QRect, QSize, Qt
-from PySide6.QtGui import (QColor, QFont, QKeySequence, QPainter, QSyntaxHighlighter,
+from PySide6.QtGui import (QColor, QFont, QFontDatabase, QKeySequence, QPainter, QSyntaxHighlighter,
                            QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
@@ -26,6 +26,13 @@ def direction_for(text):
         if bidi == 'L':
             return Qt.LayoutDirection.LeftToRight
     return Qt.LayoutDirection.LeftToRight
+
+
+def fixed_font(size):
+    installed = set(QFontDatabase.families())
+    family = next((name for name in ('DejaVu Sans Mono', 'Courier New', 'Noto Sans Mono', 'Consolas')
+                   if name in installed), 'monospace')
+    return QFont(family, size)
 
 
 class PythonHighlighter(QSyntaxHighlighter):
@@ -62,7 +69,7 @@ class CodeEditor(QPlainTextEdit):
         super().__init__(parent)
         self.setLayoutDirection(Qt.LayoutDirection.LeftToRight)
         self.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
-        self.setFont(QFont('DejaVu Sans Mono', 12))
+        self.setFont(fixed_font(12))
         self.setTabStopDistance(self.fontMetrics().horizontalAdvance(' ') * 4)
         self.set_direction(Qt.LayoutDirection.LayoutDirectionAuto)
         self.highlighter = PythonHighlighter(self.document())
@@ -159,7 +166,7 @@ class Console(QTextEdit):
         # QTextEdit honors per-paragraph direction/alignment. QPlainTextEdit's
         # layout ignores block alignment and cannot right-align mixed log lines.
         self.document().setMaximumBlockCount(maximum_blocks + 1)
-        self.setFont(QFont('DejaVu Sans Mono', 11))
+        self.setFont(fixed_font(11))
         self.extra_actions = []
 
     def append_output(self, text, tag, stamp='', prefix=''):
@@ -173,8 +180,11 @@ class Console(QTextEdit):
             block = cursor.blockFormat()
             direction = direction_for(line)
             block.setLayoutDirection(direction)
-            block.setAlignment(Qt.AlignmentFlag.AlignRight if direction == Qt.LayoutDirection.RightToLeft
-                               else Qt.AlignmentFlag.AlignLeft)
+            alignment = (Qt.AlignmentFlag.AlignRight if direction == Qt.LayoutDirection.RightToLeft
+                         else Qt.AlignmentFlag.AlignLeft)
+            # Rich text mirrors relative left/right flags in RTL paragraphs.
+            # Use absolute alignment so Arabic really anchors to the right edge.
+            block.setAlignment(alignment | Qt.AlignmentFlag.AlignAbsolute)
             cursor.setBlockFormat(block)
             if index == 0 and stamp:
                 fmt = QTextCharFormat()

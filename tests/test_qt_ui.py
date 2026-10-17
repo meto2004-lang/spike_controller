@@ -97,7 +97,11 @@ class QtArabicTests(unittest.TestCase):
         cursor = QTextCursor(editor.document())
         cursor.setPosition(2)
         point = editor.cursorRect(cursor).center()
-        self.assertLessEqual(abs(editor.cursorForPosition(point).position() - 2), 1)
+        line = editor.document().begin().layout().lineAt(0)
+        point.setY(round(line.naturalTextRect().center().y() + editor.contentOffset().y()))
+        self.assertLessEqual(abs(editor.cursorForPosition(point).position() - 2), 1,
+            (editor.font().family(), editor.cursorRect(cursor), point,
+             line.naturalTextRect(), editor.contentOffset()))
         QTest.mouseDClick(editor.viewport(), Qt.MouseButton.LeftButton,
                          Qt.KeyboardModifier.NoModifier, point)
         self.assertEqual(editor.textCursor().selectedText(), 'مرحبا')
