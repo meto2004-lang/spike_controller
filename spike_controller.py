@@ -30,8 +30,11 @@ import threading
 import time
 import tempfile
 import traceback
-import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+try:
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, ttk
+except ImportError:  # The default Qt interface does not require Tcl/Tk.
+    tk = filedialog = messagebox = ttk = None
 
 from spike_core import (MAX_LINES, MAX_LINE_BYTES, MAX_HUB_LOG_BYTES,
                         EventQueue, atomic_write, training_line, validated_config)
@@ -295,6 +298,18 @@ def ts() -> str:
 # التطبيق الرئيسي
 # ---------------------------------------------------------------------------
 class App:
+    @staticmethod
+    def _display_text(text):
+        return to_visual(text)
+
+    @property
+    def _messages(self):
+        return messagebox
+
+    @property
+    def _files(self):
+        return filedialog
+
     def __init__(self, root: tk.Tk):
         self.root = root
         self.cfg = self._load_config()
@@ -544,7 +559,7 @@ class App:
                                   font=("Segoe UI", 10, "bold"))
         self.lbl_file.grid(row=0, column=0, sticky="ew", padx=(0, 8))
         ttk.Button(document_header, text="+", width=3, command=self.action_new).grid(row=0, column=2)
-        ttk.Button(document_header, text=to_visual("إغلاق التبويب"),
+        ttk.Button(document_header, text=self._display_text("إغلاق التبويب"),
                    command=self.action_close_tab).grid(row=0, column=3, padx=4)
         self.file_path_var = tk.StringVar(value="")
         self.file_path_entry = ttk.Entry(document_header, textvariable=self.file_path_var,
@@ -625,9 +640,9 @@ class App:
                                              style="Primary.Toolbar.TButton")
         self.btn_stop = self._toolbar_button(self.toolbar, "إيقاف", "stop", self.action_stop, 0, 3,
                                              style="Stop.Toolbar.TButton")
-        self.options_button = ttk.Menubutton(self.toolbar, text=to_visual("خيارات"), style="Toolbar.TMenubutton")
+        self.options_button = ttk.Menubutton(self.toolbar, text=self._display_text("خيارات"), style="Toolbar.TMenubutton")
         self.options_button.grid(row=0, column=4, padx=3, sticky="ns")
-        self.tools_button = ttk.Menubutton(self.toolbar, text=to_visual("أدوات"), style="Toolbar.TMenubutton")
+        self.tools_button = ttk.Menubutton(self.toolbar, text=self._display_text("أدوات"), style="Toolbar.TMenubutton")
         self.tools_button.grid(row=0, column=5, padx=3, sticky="ns")
         self.options_menu = tk.Menu(self.options_button, tearoff=0)
         self.tools_menu = tk.Menu(self.tools_button, tearoff=0)
@@ -648,14 +663,14 @@ class App:
             self._add_toolbar_action(self.tools_menu, key, title, icon, command, shortcut)
         target = ttk.Frame(self.toolbar)
         target.grid(row=0, column=6, sticky="ew", padx=(8, 0))
-        ttk.Label(target, text=to_visual("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
+        ttk.Label(target, text=self._display_text("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
         self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
         self.target_entry = ttk.Entry(target, textvariable=self.target_var, width=1)
         self.target_entry.pack(side="left", fill="x", expand=True)
         self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_send, self.btn_stop)
 
     def _add_toolbar_action(self, menu, key, title, icon, command, shortcut):
-        menu.add_command(label=to_visual(title), image=self._toolbar_images[icon][0], compound="left",
+        menu.add_command(label=self._display_text(title), image=self._toolbar_images[icon][0], compound="left",
                          command=command, accelerator=shortcut)
         self._action_entries[key] = (menu, menu.index("end"))
 
@@ -679,7 +694,7 @@ class App:
 
     def _toolbar_button(self, parent, title, icon, command, row, column, *, span=1,
                         style="Toolbar.TButton"):
-        button = ttk.Button(parent, text=to_visual(title), image=self._toolbar_images[icon],
+        button = ttk.Button(parent, text=self._display_text(title), image=self._toolbar_images[icon],
                             compound="left", width=-1, style=style, command=command)
         button.grid(row=row, column=column, columnspan=span, sticky="ew", padx=3, pady=3)
         return button
@@ -687,7 +702,7 @@ class App:
     def _sync_serial_button(self):
         title = "إيقاف COM" if self.serial_running else "استقبال COM"
         icon = "stop" if self.serial_running else "serial"
-        self._configure_action("serial", label=to_visual(title), image=self._toolbar_images[icon][0])
+        self._configure_action("serial", label=self._display_text(title), image=self._toolbar_images[icon][0])
 
     def _ts_var(self):
         if not hasattr(self, "_v_ts"):
@@ -771,7 +786,7 @@ class App:
 
         m_help = tk.Menu(menubar, tearoff=0)
         m_help.add_command(label="شرح الاستخدام", accelerator="F1", command=self.action_help)
-        m_help.add_command(label="عن التطبيق", command=lambda: messagebox.showinfo(
+        m_help.add_command(label="عن التطبيق", command=lambda: self._messages.showinfo(
             "عن التطبيق",
             "Hyena Control 1.0\nتطبيق تحكم بروبوت SPIKE Prime (Pybricks) عبر البلوتوث\n"
             "يعتمد على pybricksdev + bleak"))
@@ -873,7 +888,7 @@ class App:
             self._untitled_counter += 1
         document = self._create_editor_tab(content, path, saved, self._untitled_counter, suggested_name)
         self.documents.append(document)
-        self.notebook.add(document.frame, text=to_visual(document.name))
+        self.notebook.add(document.frame, text=self._display_text(document.name))
         self._select_document(document)
         self._update_lineno(document)
         document.highlight_job = self.root.after_idle(lambda: self._rehighlight(document))
@@ -1127,7 +1142,6 @@ class App:
 
     # ---------------- الكونسول ----------------
     def console(self, text: str, tag: str = "out", source: str = "ble") -> None:
-        w = self.console_w
         line = text.rstrip("\n")
         if len(line.encode("utf-8")) > MAX_LINE_BYTES:
             self.training_overflow = True
@@ -1145,18 +1159,7 @@ class App:
         self.console_raw.append((stamp + " " + display) if self._ts_var().get() else display)
         if len(self.console_raw) > MAX_LINES:
             del self.console_raw[:5000]
-        at_end = w.yview()[1] >= 0.99
-        if self._ts_var().get():
-            w.insert("end", stamp + " ", "ts")
-        # Shape the Arabic source label separately: applying RTL to the whole
-        # line can move Python parentheses ahead of the command.
-        visual_prefix = to_visual("[سلك]") + " " if source == "serial" else ""
-        rendered = visual_prefix + "\n".join(to_visual(part) for part in line.split("\n"))
-        w.insert("end", rendered + "\n", tag)
-        if int(w.index("end-1c").split(".")[0]) > MAX_LINES:
-            w.delete("1.0", "5001.0")
-        if at_end:
-            w.see("end")
+        self._append_console_display(line, tag, source, stamp)
         self.rx_count += 1
         self.lbl_rx.configure(text=f"{self.rx_count} سطر")
         if self._al_var().get():
@@ -1175,7 +1178,22 @@ class App:
                 traceback.print_exc()
                 self._al_var().set(False)
                 self._toggle_al()
-                messagebox.showerror("حفظ السجل", f"تم تعطيل الحفظ التلقائي: {exc}")
+                self._messages.showerror("حفظ السجل", f"تم تعطيل الحفظ التلقائي: {exc}")
+
+    def _append_console_display(self, line, tag, source, stamp):
+        w = self.console_w
+        at_end = w.yview()[1] >= 0.99
+        if self._ts_var().get():
+            w.insert("end", stamp + " ", "ts")
+        # Shape the Arabic source label separately: applying RTL to the whole
+        # line can move Python parentheses ahead of the command.
+        visual_prefix = self._display_text("[سلك]") + " " if source == "serial" else ""
+        rendered = visual_prefix + "\n".join(self._display_text(part) for part in line.split("\n"))
+        w.insert("end", rendered + "\n", tag)
+        if int(w.index("end-1c").split(".")[0]) > MAX_LINES:
+            w.delete("1.0", "5001.0")
+        if at_end:
+            w.see("end")
 
     # ---------------- حلقة الرسائل من خيط BLE ----------------
     def _poll(self) -> None:
@@ -1210,7 +1228,7 @@ class App:
         self._upload_state = "pending"
         self._upload_percent = 0
         self.upload_bar.configure(value=0, style="Upload.Horizontal.TProgressbar")
-        self.lbl_upload.configure(text="0% — " + to_visual("تحضير الرفع"))
+        self.lbl_upload.configure(text="0% — " + self._display_text("تحضير الرفع"))
 
     def _handle_upload_progress(self, op_id, sent, total, complete):
         if (op_id != self._upload_progress_id or self._upload_state not in ("pending", "uploading")
@@ -1222,7 +1240,7 @@ class App:
         self._upload_percent = percent
         self._upload_state = "complete" if percent == 100 else "uploading"
         self.upload_bar.configure(value=self._upload_percent, style="Upload.Horizontal.TProgressbar")
-        text = ("100% — " + to_visual("اكتمل الرفع") if percent == 100
+        text = ("100% — " + self._display_text("اكتمل الرفع") if percent == 100
                 else f"{self._upload_percent}% | {sent}/{total} B")
         self.lbl_upload.configure(text=text)
 
@@ -1231,17 +1249,17 @@ class App:
             return
         if self._upload_state == "complete":
             if error is not None:
-                self.lbl_upload.configure(text="100% — " + to_visual("اكتمل الرفع؛ انتهت العملية بخطأ أو إلغاء"))
+                self.lbl_upload.configure(text="100% — " + self._display_text("اكتمل الرفع؛ انتهت العملية بخطأ أو إلغاء"))
             return  # Upload completion is separate from starting/waiting for the program.
         if error is None:
             self._upload_state = "unknown"
-            self.lbl_upload.configure(text=to_visual("اكتملت العملية؛ نسبة الرفع غير متاحة"))
+            self.lbl_upload.configure(text=self._display_text("اكتملت العملية؛ نسبة الرفع غير متاحة"))
             return  # Never fabricate a percentage on legacy/unsupported transports.
         cancelled = isinstance(error, (concurrent.futures.CancelledError, asyncio.CancelledError))
         self._upload_state = "cancelled" if cancelled else "failed"
         style = "Cancelled" if cancelled else "Failed"
         self.upload_bar.configure(style=style + ".Upload.Horizontal.TProgressbar")
-        self.lbl_upload.configure(text=f"{self._upload_percent}% — " + to_visual("أُلغي الرفع" if cancelled else "فشل الرفع"))
+        self.lbl_upload.configure(text=f"{self._upload_percent}% — " + self._display_text("أُلغي الرفع" if cancelled else "فشل الرفع"))
 
     def _handle_msg(self, msg) -> None:
         kind = msg[0]
@@ -1644,9 +1662,9 @@ class App:
             return
         target = self.target_var.get().strip()
         if len(target) > 128 or any(ord(c) < 32 for c in target):
-            messagebox.showerror("اسم الروبوت", "اسم أو عنوان الروبوت غير صالح")
+            self._messages.showerror("اسم الروبوت", "اسم أو عنوان الروبوت غير صالح")
             return
-        if not target and not messagebox.askyesno(
+        if not target and not self._messages.askyesno(
                 "اختيار الروبوت", "لم تحدد اسماً أو عنواناً. هل تريد الاتصال بأول روبوت متاح؟",
                 default="no"):
             return
@@ -1794,7 +1812,7 @@ class App:
         if not document.dirty:
             return True
         self._select_document(document)
-        answer = messagebox.askyesnocancel(
+        answer = self._messages.askyesnocancel(
             "تعديلات غير محفوظة", f"هل تريد حفظ التعديلات على {document.name} قبل الإغلاق؟")
         if answer is None:
             return False
@@ -1806,7 +1824,7 @@ class App:
     def action_open(self):
         if self._closing or self._confirming_close:
             return False
-        path = filedialog.askopenfilename(
+        path = self._files.askopenfilename(
             title="فتح ملف بايثون", filetypes=[("ملفات بايثون", "*.py"), ("الكل", "*.*")],
             initialdir=(os.path.dirname(self.current_path) if self.current_path else APP_DIR))
         return self._open_path(path) if path else False
@@ -1827,7 +1845,7 @@ class App:
             with open(path, "r", encoding="utf-8-sig") as stream:
                 text = stream.read()
         except Exception as exc:
-            messagebox.showerror("خطأ", f"تعذر فتح الملف:\n{exc}")
+            self._messages.showerror("خطأ", f"تعذر فتح الملف:\n{exc}")
             return False
         self._new_document(text, path=os.path.abspath(path))
         self._add_recent(os.path.abspath(path))
@@ -1849,7 +1867,7 @@ class App:
             return False
         path = document.path
         if not path or save_as:
-            path = filedialog.asksaveasfilename(
+            path = self._files.asksaveasfilename(
                 title="حفظ باسم", defaultextension=".py", filetypes=[("ملفات بايثون", "*.py")],
                 initialdir=os.path.dirname(path) if path else APP_DIR,
                 initialfile=os.path.basename(path) if path else (
@@ -1864,13 +1882,13 @@ class App:
             return False
         owner = self._find_document(path)
         if owner is not None and owner is not document:
-            messagebox.showerror("ملف مفتوح", "هذا الملف مفتوح في تبويب آخر؛ احفظ باسم مختلف أو انتقل إلى تبويبه.")
+            self._messages.showerror("ملف مفتوح", "هذا الملف مفتوح في تبويب آخر؛ احفظ باسم مختلف أو انتقل إلى تبويبه.")
             return False
         try:
             text = document.editor.get("1.0", "end-1c")
             atomic_write(path, text)
         except Exception as exc:
-            messagebox.showerror("خطأ", f"تعذر الحفظ:\n{exc}")
+            self._messages.showerror("خطأ", f"تعذر الحفظ:\n{exc}")
             return False
         document.saved_text = text
         document.editor.edit_modified(False)
@@ -1882,19 +1900,19 @@ class App:
 
     def _update_send_target(self):
         path = self._sending_path
-        label = to_visual("ملف العملية الحالية:") if path else to_visual("سيُرسل:")
+        label = self._display_text("ملف العملية الحالية:") if path else self._display_text("سيُرسل:")
         name = (f"{os.path.basename(path)} — {os.path.dirname(os.path.abspath(path))}"
                 if path else self.active_document.name)
-        self.lbl_send_target.configure(text=f"{label} {to_visual(name)}")
+        self.lbl_send_target.configure(text=f"{label} {self._display_text(name)}")
 
     def _set_file_label(self):
         if self.active_document is None:
             return
         for document, title in tab_names(self.documents).items():
-            self.notebook.tab(document.frame, text=to_visual(title) + "  ")
+            self.notebook.tab(document.frame, text=self._display_text(title) + "  ")
         document = self.active_document
         marker = "* " if document.dirty else ""
-        self.lbl_file.configure(text=marker + to_visual(document.name))
+        self.lbl_file.configure(text=marker + self._display_text(document.name))
         self.file_path_var.set(os.path.abspath(document.path) if document.path else "")
         self._update_send_target()
         if not self._closing:
@@ -1923,11 +1941,11 @@ class App:
         try:
             os.startfile(LOG_DIR)
         except Exception:
-            messagebox.showinfo("مجلد السجلات", LOG_DIR)
+            self._messages.showinfo("مجلد السجلات", LOG_DIR)
 
     # ---------------- أدوات ----------------
     def action_clear_console(self):
-        if self.training_lines and not messagebox.askyesno(
+        if self.training_lines and not self._messages.askyesno(
                 "جلسة تدريب جديدة", "سيتم مسح بيانات التدريب الحالية من الذاكرة. متابعة؟"):
             return
         self.queue.discard_console()
@@ -1940,7 +1958,7 @@ class App:
         self.lbl_rx.configure(text="0 سطر")
 
     def action_export_log(self):
-        p = filedialog.asksaveasfilename(
+        p = self._files.asksaveasfilename(
             title="تصدير سجل المخرجات", defaultextension=".txt",
             filetypes=[("نص", "*.txt"), ("الكل", "*.*")],
             initialdir=LOG_DIR,
@@ -1951,7 +1969,7 @@ class App:
             atomic_write(p, "\n".join(self.console_raw))
             self.console(f"صُدّر السجل: {p}", "ok")
         except Exception as e:
-            messagebox.showerror("خطأ", f"تعذر التصدير:\n{e}")
+            self._messages.showerror("خطأ", f"تعذر التصدير:\n{e}")
 
     def _training_snapshot(self):
         revision, pending, lost = self.queue.training_status()
@@ -1973,7 +1991,7 @@ class App:
         t.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
         t.pack(fill="both", expand=True)
-        t.insert("1.0", "\n".join(to_visual(line) for line in HELP_TEXT.split("\n")))
+        t.insert("1.0", "\n".join(self._display_text(line) for line in HELP_TEXT.split("\n")))
         t.configure(state="disabled")
 
     def _insert_at_cursor(self, text):
@@ -2055,6 +2073,14 @@ class App:
 # نافذة توليد برنامج السباق
 # ---------------------------------------------------------------------------
 class RaceGenWindow:
+    @property
+    def _messages(self):
+        return self.app._messages
+
+    @property
+    def _files(self):
+        return self.app._files
+
     def __init__(self, app: App):
         self.app = app
         self.win = tk.Toplevel(app.root)
@@ -2090,7 +2116,7 @@ class RaceGenWindow:
         snapshot = self.app._training_snapshot()
         if snapshot is None:
             self.preview.delete("1.0", "end")
-            messagebox.showerror("بيانات غير مكتملة", "انتظر اكتمال الاستقبال ومعالجة الرسائل. عند فقد بيانات ابدأ جلسة جديدة وأعد استقبال التدريب كاملاً.")
+            self._messages.showerror("بيانات غير مكتملة", "انتظر اكتمال الاستقبال ومعالجة الرسائل. عند فقد بيانات ابدأ جلسة جديدة وأعد استقبال التدريب كاملاً.")
             return
         kept = []
         errors = []
@@ -2103,7 +2129,7 @@ class RaceGenWindow:
                 errors.append(f"السطر {number}: {exc}")
         if errors:
             self.preview.delete("1.0", "end")
-            messagebox.showerror("أوامر تدريب مرفوضة", "\n".join(errors[:10]))
+            self._messages.showerror("أوامر تدريب مرفوضة", "\n".join(errors[:10]))
             return
         if not kept:
             kept = ["# (لا توجد بيانات تدريب في الجلسة الحالية)"]
@@ -2114,7 +2140,7 @@ class RaceGenWindow:
                "hub.light.on(Color.BLUE)\nhub.speaker.beep(900, 200)\n"
         if snapshot != self.app._training_snapshot():
             self.preview.delete("1.0", "end")
-            messagebox.showerror("تغيرت البيانات", "وصلت بيانات جديدة أثناء التوليد؛ انتظر اكتمال الاستقبال ثم حدّث المعاينة.")
+            self._messages.showerror("تغيرت البيانات", "وصلت بيانات جديدة أثناء التوليد؛ انتظر اكتمال الاستقبال ثم حدّث المعاينة.")
             return
         self.preview_snapshot = snapshot
         self.preview.delete("1.0", "end")
@@ -2124,14 +2150,14 @@ class RaceGenWindow:
     def _preview_current(self):
         snapshot = self.app._training_snapshot()
         if snapshot is None or getattr(self, "preview_snapshot", None) != snapshot:
-            messagebox.showerror("معاينة قديمة", "تغيرت بيانات التدريب أو ما زال الاستقبال قيد المعالجة؛ حدّث المعاينة قبل الحفظ أو النسخ.")
+            self._messages.showerror("معاينة قديمة", "تغيرت بيانات التدريب أو ما زال الاستقبال قيد المعالجة؛ حدّث المعاينة قبل الحفظ أو النسخ.")
             return False
         return bool(self.preview.get("1.0", "end-1c").strip())
 
     def save(self):
         if self.app._closing or self.app._confirming_close or not self._preview_current():
             return
-        p = filedialog.asksaveasfilename(
+        p = self._files.asksaveasfilename(
             title="حفظ برنامج السباق", defaultextension=".py",
             filetypes=[("ملفات بايثون", "*.py")],
             initialdir=(os.path.dirname(self.app.current_path) if self.app.current_path else APP_DIR),
@@ -2139,14 +2165,14 @@ class RaceGenWindow:
         if not p or not self._preview_current():
             return
         if self.app._find_document(p) is not None:
-            messagebox.showerror("ملف مفتوح", "هذا الملف مفتوح في تبويب؛ افتح نتيجة السباق في تبويب جديد واحفظها باسم مختلف.")
+            self._messages.showerror("ملف مفتوح", "هذا الملف مفتوح في تبويب؛ افتح نتيجة السباق في تبويب جديد واحفظها باسم مختلف.")
             return
         try:
             atomic_write(p, self.preview.get("1.0", "end-1c"))
             self.app.console(f"حُفظ برنامج السباق: {p}", "ok")
             self.app._add_recent(p)
         except Exception as e:
-            messagebox.showerror("خطأ", f"تعذر الحفظ:\n{e}")
+            self._messages.showerror("خطأ", f"تعذر الحفظ:\n{e}")
 
     def to_editor(self):
         if not self._preview_current() or self.app._closing:
@@ -2253,18 +2279,29 @@ def _run_gui(smoke=False):
             _WORKER.loop.close()
 
 
-def main():
+def legacy_main():
     _run_gui()
 
 
-def selftest():
-    """Build the UI and exercise the normal close path, with guaranteed cleanup."""
+def legacy_selftest():
+    """Exercise the optional legacy Tk interface."""
     _run_gui(smoke=True)
     print("SELFTEST OK")
 
 
+def main():
+    from spike_qt import run
+    return run()
+
+
+def selftest():
+    from spike_qt import run
+    return run(smoke=True)
+
+
 if __name__ == "__main__":
-    if "--selftest" in sys.argv:
-        selftest()
+    sys.modules.setdefault("spike_controller", sys.modules[__name__])
+    if "--legacy-tk" in sys.argv:
+        legacy_selftest() if "--selftest" in sys.argv else legacy_main()
     else:
-        main()
+        selftest() if "--selftest" in sys.argv else main()
