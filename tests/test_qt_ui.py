@@ -11,7 +11,7 @@ from test_controller import controller
 
 try:
     from PySide6.QtCore import Qt
-    from PySide6.QtGui import QInputMethodEvent, QTextCursor
+    from PySide6.QtGui import QFontDatabase, QInputMethodEvent, QTextCursor
     from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
     from spike_qt import MainWindow, QtApp
@@ -37,6 +37,8 @@ class QtArabicTests(unittest.TestCase):
     def setUpClass(cls):
         cls.qt = QApplication.instance() or QApplication([])
         cls.qt.setQuitOnLastWindowClosed(False)
+        if not QFontDatabase.families():
+            raise RuntimeError('Native fonts are required to validate Arabic shaping and hit testing')
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
