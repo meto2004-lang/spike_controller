@@ -261,6 +261,8 @@ class FilenameLayoutTests(unittest.TestCase):
         self.assertEqual(self.app._start_op.call_args.args[0], 'stop')
 
     def add_copy_sample(self):
+        # Startup includes welcome/dependency messages; isolate the selected sample.
+        self.app.console_w.delete('1.0', 'end')
         self.app._ts_var().set(True)
         with patch.object(controller, 'ts', return_value='[12:34:56]'):
             self.app.console('robot.straight(100)', 'out')
@@ -319,6 +321,7 @@ class FilenameLayoutTests(unittest.TestCase):
 
     def test_editor_copy_keeps_clock_text_and_is_not_console_filtered(self):
         source = 'print("[12:34:56]")\n'
+        self.app.editor.delete('1.0', 'end')
         self.app.editor.insert('1.0', source)
         self.app.editor.tag_add('sel', '1.0', 'end-1c')
         self.app.editor.event_generate('<<Copy>>')
