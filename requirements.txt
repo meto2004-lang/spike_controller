@@ -1,4 +1,5 @@
-# Python 3.11+; Tkinter is provided by Python/the operating system, not pip.
+# Python 3.11+. Qt provides native Arabic shaping and bidirectional editing.
+PySide6>=6.8,<7
 pybricksdev>=2.3.2,<3
 bleak>=1.1,<4
 pyusb>=1.3.1,<2

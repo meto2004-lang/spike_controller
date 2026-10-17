@@ -629,7 +629,7 @@ class ConsoleShortcutTests(unittest.TestCase):
 
 class StartupTests(unittest.TestCase):
     def test_startup_failure_returns_nonzero_and_closes_worker_loop(self):
-        for entry_point in (controller.main, controller.selftest):
+        for entry_point in (controller.legacy_main, controller.legacy_selftest):
             with self.subTest(entry_point=entry_point.__name__):
                 worker = controller.Worker()
                 root = MagicMock()
@@ -652,7 +652,7 @@ class StartupTests(unittest.TestCase):
                 patch.object(controller.tk, 'Tk', side_effect=RuntimeError('no display'), create=True), \
                 patch.object(controller.traceback, 'print_exc'):
             with self.assertRaises(SystemExit):
-                controller.selftest()
+                controller.legacy_selftest()
         self.assertFalse(worker.thread.is_alive())
         self.assertTrue(worker.loop.is_closed())
 
