@@ -406,8 +406,9 @@ class App:
             self.cfg["geometry"] = self.root.geometry()
             try:
                 self.cfg["sash"] = self.paned.sashpos(0)
-                if self.paned.winfo_height() > 0:
-                    self.cfg["editor_fraction"] = self.cfg["sash"] / self.paned.winfo_height()
+                height = self.paned.winfo_height()
+                if height > 0:
+                    self.cfg["editor_fraction"] = max(0.2, min(0.9, self.cfg["sash"] / height))
             except Exception:
                 pass
             atomic_write(CONFIG_FILE, json.dumps(self.cfg, ensure_ascii=False, indent=2))
@@ -451,13 +452,6 @@ class App:
         st.configure("TCheckbutton", background=self.BG, foreground=self.FG)
         st.map("TCheckbutton", background=[("active", self.BG)])
 
-        st.configure("Toolbar.TLabelframe", background=self.PANEL, bordercolor="#3b4052",
-                     borderwidth=1, relief="solid")
-        st.configure("Toolbar.TLabelframe.Label", background=self.PANEL, foreground="#c5cede",
-                     font=("Segoe UI", 10, "bold"))
-        st.configure("Toolbar.TFrame", background=self.PANEL)
-        st.configure("ToolbarCaption.TLabel", background=self.PANEL, foreground="#a9b4c8",
-                     font=("Segoe UI", 9))
         st.configure("Toolbar.TButton", background="#34394b", foreground=self.FG,
                      bordercolor="#454d64", borderwidth=1, padding=(8, 4),
                      font=("Segoe UI", 9), anchor="center", relief="flat")
@@ -503,9 +497,14 @@ class App:
         self.lbl_send_target.pack(side="top", fill="x", padx=12, pady=(2, 4))
 
         # ---- شريط الحالة ----
-        self.upload_bar = ttk.Progressbar(self.root, orient="horizontal", mode="determinate",
+        # Clam's native progress element ignores "thickness" on some Tk builds.
+        # Constrain its actual allocated height, not just its requested style.
+        self.upload_track = ttk.Frame(self.root, height=6)
+        self.upload_track.pack(side="bottom", fill="x", padx=8, pady=(0, 3))
+        self.upload_track.pack_propagate(False)
+        self.upload_bar = ttk.Progressbar(self.upload_track, orient="horizontal", mode="determinate",
                                           maximum=100, value=0, style="Upload.Horizontal.TProgressbar")
-        self.upload_bar.pack(side="bottom", fill="x", padx=8, pady=(0, 3))
+        self.upload_bar.pack(fill="both", expand=True)
         sb = ttk.Frame(self.root, padding=(10, 3))
         sb.pack(side="bottom", fill="x")
         sb.columnconfigure(0, weight=1)
@@ -680,7 +679,7 @@ class App:
     def _toolbar_button(self, parent, title, icon, command, row, column, *, span=1,
                         style="Toolbar.TButton"):
         button = ttk.Button(parent, text=to_visual(title), image=self._toolbar_images[icon],
-                            compound="left", style=style, command=command)
+                            compound="left", width=-1, style=style, command=command)
         button.grid(row=row, column=column, columnspan=span, sticky="ew", padx=3, pady=3)
         return button
 
@@ -1194,7 +1193,9 @@ class App:
                 or type(sent) is not int or type(total) is not int or total <= 0 or not 0 <= sent <= total):
             return
         percent = 100 if complete is True and sent == total else min(99, sent * 100 // total)
-        self._upload_percent = max(self._upload_percent, percent)
+        if percent < self._upload_percent:
+            return
+        self._upload_percent = percent
         self._upload_state = "complete" if percent == 100 else "uploading"
         self.upload_bar.configure(value=self._upload_percent, style="Upload.Horizontal.TProgressbar")
         text = ("100% — " + to_visual("اكتمل الرفع") if percent == 100

@@ -195,6 +195,34 @@ class ProgressTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(app._upload_percent, 100)
         self.assertFalse(app._download_uncertain)
 
+    async def test_real_fresh_idle_notification_is_required_before_100(self):
+        from test_transfer_review import ReplayStatus
+        app, hub = app_fixture(), ModernHub()
+        status = hub.status_observable = ReplayStatus(0)
+        app._reset_upload_progress(7)
+        task = asyncio.create_task(app._execute_op(7, lambda: app._download_program(hub, 'source.py')))
+        self.addAsyncCleanup(self.cancel_task, task)
+        await asyncio.wait_for(status.subscriptions.get(), timeout=1)
+        while not app.queue.empty():
+            msg = app.queue.get_nowait()
+            if msg[0] == 'upload_progress':
+                app._handle_msg(msg)
+        self.assertFalse(task.done())
+        self.assertEqual(app._upload_percent, 99)  # Even though final metadata was ACKed.
+        status.emit(0)
+        await asyncio.wait_for(task, timeout=1)
+        while not app.queue.empty():
+            msg = app.queue.get_nowait()
+            if msg[0] == 'upload_progress':
+                app._handle_msg(msg)
+        self.assertEqual(app._upload_percent, 100)
+        self.assertEqual(status.listeners, [])
+
+    async def cancel_task(self, task):
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
     async def test_readiness_error_or_cancellation_after_final_ack_still_never_reaches_100(self):
         for error in (TimeoutError('no fresh status'), asyncio.CancelledError()):
             with self.subTest(error=type(error).__name__):

@@ -212,7 +212,8 @@ class FilenameLayoutTests(unittest.TestCase):
             for index, (left, top, right, bottom) in enumerate(rectangles):
                 for other_left, other_top, other_right, other_bottom in rectangles[index + 1:]:
                     self.assertFalse(left < other_right and right > other_left and top < other_bottom and bottom > other_top)
-            self.assertGreater(self.app.target_entry.winfo_width(), 100)
+            self.assertGreater(self.app.target_entry.winfo_width(), 100,
+                               [(str(w), w.winfo_reqwidth(), w.winfo_width()) for w in self.app.toolbar.winfo_children()])
             self.assertGreater(self.app.editor.winfo_height(), 210)
             self.assertGreater(self.app.editor.winfo_height(), self.app.console_w.winfo_height())
 
