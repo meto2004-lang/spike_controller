@@ -260,6 +260,71 @@ class FilenameLayoutTests(unittest.TestCase):
         self.app.btn_stop.invoke()
         self.assertEqual(self.app._start_op.call_args.args[0], 'stop')
 
+    def add_copy_sample(self):
+        self.app._ts_var().set(True)
+        with patch.object(controller, 'ts', return_value='[12:34:56]'):
+            self.app.console('robot.straight(100)', 'out')
+            self.app.console('[01:02:03] robot time\nrobot.turn(90)', 'info')
+        self.app._select_all_console()
+        self.root.update()
+        return 'robot.straight(100)\n[01:02:03] robot time\nrobot.turn(90)\n'
+
+    def test_console_copy_event_excludes_only_app_time_and_keeps_logs_unchanged(self):
+        expected = self.add_copy_sample()
+        displayed = self.app.console_w.get('1.0', 'end-1c')
+        raw, training = self.app.console_raw[:], self.app.training_lines[:]
+        self.app.console_w.event_generate('<<Copy>>')
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), expected)
+        self.assertEqual(self.app.console_w.get('1.0', 'end-1c'), displayed)
+        self.assertEqual(self.app.console_raw, raw)
+        self.assertEqual(self.app.training_lines, training)
+
+    def test_console_ctrl_c_and_copy_button_use_filtered_clipboard(self):
+        expected = self.add_copy_sample()
+        self.root.focus_force()
+        self.app.console_w.focus_set()
+        self.root.update()
+        self.app.console_w.event_generate('<Control-KeyPress-c>')
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), expected)
+        self.root.clipboard_clear()
+        self.app._copy_console()  # Also the header button / Ctrl+Shift+C callback.
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), expected)
+
+    def test_console_copy_handles_partial_timestamp_selection_and_empty_output(self):
+        self.add_copy_sample()
+        widget = self.app.console_w
+        widget.tag_remove('sel', '1.0', 'end')
+        widget.tag_add('sel', '1.4', '2.4')
+        widget.event_generate('<<Copy>>')
+        self.assertEqual(self.root.clipboard_get(), 'robot.straight(100)\n')
+        widget.tag_remove('sel', '1.0', 'end')
+        widget.tag_add('sel', '1.1', '1.5')
+        widget.event_generate('<<Copy>>')
+        self.assertEqual(self.root.clipboard_get(), '')
+
+    def test_console_copy_after_timestamp_toggle_and_clear(self):
+        self.add_copy_sample()
+        widget = self.app.console_w
+        widget.delete('1.0', 'end')
+        self.app._ts_var().set(False)
+        self.app.console('[12:34:56] from robot')
+        self.app._ts_var().set(True)
+        self.app.console('next')
+        self.app._select_all_console()
+        widget.event_generate('<<Copy>>')
+        self.assertEqual(self.root.clipboard_get(), '[12:34:56] from robot\nnext\n')
+
+    def test_editor_copy_keeps_clock_text_and_is_not_console_filtered(self):
+        source = 'print("[12:34:56]")\n'
+        self.app.editor.insert('1.0', source)
+        self.app.editor.tag_add('sel', '1.0', 'end-1c')
+        self.app.editor.event_generate('<<Copy>>')
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), source)
+
     def test_upload_bar_is_thin_green_and_at_the_very_bottom(self):
         bar = self.app.upload_bar
         self.assertTrue(bar.winfo_ismapped())

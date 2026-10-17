@@ -187,7 +187,7 @@ HELP_TEXT = """\
    Ctrl+N/O/S تبويب جديد/فتح/حفظ | Ctrl+Shift+S حفظ باسم
    Ctrl+W إغلاق التبويب | Ctrl+Tab / Ctrl+Shift+Tab تنقل
    Ctrl+L جلسة جديدة ومسح البيانات
-   Ctrl+Shift+C نسخ المحدد من الكونسول (أو زر يمين في الكونسول)
+   Ctrl+Shift+C نسخ المحدد من الكونسول دون الوقت (أو زر يمين في الكونسول)
 
 7) الكونسول:
    - حدّد أي نص بالفأرة وانسخه (Ctrl+C أو قائمة يمين)
@@ -592,6 +592,7 @@ class App:
 
         # الكونسول: قراءة فقط مع إمكانية التحديد والنسخ + قائمة يمين
         self.console_w.bind("<Key>", self._console_key)
+        self.console_w.bind("<<Copy>>", self._on_console_copy)
         for event in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<PasteSelection>>"):
             self.console_w.bind(event, lambda e: "break")
         self.console_w.bind("<Button-3>", self._console_menu)
@@ -1039,8 +1040,9 @@ class App:
             if key == "c":
                 if shift:
                     self._copy_console()
-                    return "break"
-                return None  # native copy; no application shortcut needed
+                else:
+                    self._on_console_copy()
+                return "break"
             if key == "a":
                 self._select_all_console()
                 return "break"
@@ -1059,6 +1061,28 @@ class App:
                 "Shift_L", "Shift_R", "Control_L", "Control_R"):
             return None
         return "break"
+
+    def _on_console_copy(self, event=None):
+        """Copy selected output, excluding only the app's tagged timestamps.
+
+        Do not match clock-shaped strings: they may belong to robot output.
+        Dump just the selection and retain its newlines and partial lines.
+        """
+        w = self.console_w
+        selection = w.tag_ranges("sel")
+        if not selection:
+            return "break"
+        parts = []
+        for start, end in zip(selection[::2], selection[1::2]):
+            timestamp = "ts" in w.tag_names(start)
+            for kind, value, _ in w.dump(start, end, text=True, tag=True):
+                if value == "ts" and kind in ("tagon", "tagoff"):
+                    timestamp = kind == "tagon"
+                elif kind == "text" and not timestamp:
+                    parts.append(value)
+        w.clipboard_clear()
+        w.clipboard_append("".join(parts))
+        return "break"  # Never let Tk's class binding copy the timestamps again.
 
     def _copy_console(self) -> None:
         sel = self.console_w.tag_ranges("sel")
