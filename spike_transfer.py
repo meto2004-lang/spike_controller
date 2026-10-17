@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import contextmanager
+from contextvars import ContextVar
 from time import monotonic
 from importlib.metadata import PackageNotFoundError, version
 import sys
@@ -119,9 +120,73 @@ def needs_fresh_status(hub) -> bool:
             and getattr(hub, "_mpy_abi_version", None) == 0)
 
 
+class UploadProgress:
+    """Confirmed modern-protocol data, capped below 100 until safe completion."""
+    def __init__(self, callback):
+        self.callback = callback
+        self.total = self.sent = 0
+        self.valid = self.finalized = False
+        self._last_percent = -1
+
+    def begin(self, total):
+        self.total, self.sent = total, 0
+        self.valid, self.finalized = total > 0, False
+        self._last_percent = -1
+        self._notify()
+
+    def acknowledge(self, offset, size):
+        if not self.valid:
+            return
+        if offset != self.sent or self.sent + size > self.total:
+            self.valid = False
+            return
+        self.sent += size
+        self._notify()
+
+    def finalize(self, total):
+        self.finalized = self.valid and total == self.total and self.sent == self.total
+
+    def finish(self):
+        if self.finalized:
+            self._notify(complete=True)
+
+    def _notify(self, complete=False):
+        if not self.valid or self.callback is None:
+            return
+        percent = 100 if complete else min(99, self.sent * 100 // self.total)
+        if percent == self._last_percent:
+            return
+        self._last_percent = percent
+        try:
+            self.callback(self.sent, self.total, complete)
+        except Exception:
+            # A UI reporter must never break or cause a retry of robot I/O.
+            self.callback = None
+
+
+_UPLOAD_PROGRESS = ContextVar("upload_progress", default=None)
+
+
+@contextmanager
+def upload_progress(callback):
+    """One reporter per worker task; nested/concurrent operations cannot mix."""
+    token = _UPLOAD_PROGRESS.set(UploadProgress(callback))
+    try:
+        yield
+    finally:
+        _UPLOAD_PROGRESS.reset(token)
+
+
+def finish_upload_progress():
+    progress = _UPLOAD_PROGRESS.get()
+    if progress is not None:
+        progress.finish()
+
+
 class UploadWriteTrace:
     """Our instrumentation adds no console/file I/O on successful writes."""
-    def __init__(self):
+    def __init__(self, progress=None):
+        self.progress = progress
         self.acked_bytes = 0
         self.last_ack = None
         self.max_write_ms = 0.0
@@ -157,6 +222,11 @@ class UploadWriteTrace:
         self.last_ack = monotonic()
         self.max_write_ms = max(self.max_write_ms, (self.last_ack - started) * 1000)
         self.acked_bytes += payload
+        if self.progress is not None:
+            if command == WRITE_USER_RAM:
+                self.progress.acknowledge(value, payload)
+            elif value != 0:
+                self.progress.finalize(value)
         return result
 
 
@@ -167,26 +237,45 @@ def trace_upload_writes(hub):
     The library still owns compilation/framing, and no error is retried. Restore
     the exact instance attribute (or inherited method) on success, error/cancel.
     """
-    if getattr(hub, "_app_ble_upload_configured", False) is not True:
+    progress = _UPLOAD_PROGRESS.get()
+    tracing = getattr(hub, "_app_ble_upload_configured", False) is True
+    # The optional UI reporter also observes modern USB writes, without changing
+    # packet sizing, bytes, response mode, retry policy, or readiness on USB.
+    if not tracing and progress is None:
         yield
         return
-    original = hub.write_gatt_char
+    if not callable(getattr(hub, "write_gatt_char", None)):
+        yield
+        return
     attributes = vars(hub)
-    had_override = "write_gatt_char" in attributes
-    previous_override = attributes.get("write_gatt_char")
-    trace = UploadWriteTrace()
+    originals = {}
+
+    def replace(name, replacement):
+        originals[name] = (name in attributes, attributes.get(name))
+        setattr(hub, name, replacement)
+
+    original = hub.write_gatt_char
+    trace = UploadWriteTrace(progress)
 
     async def write(uuid, data, *args, **kwargs):
         return await trace.write(original, hub, uuid, data, *args, **kwargs)
 
-    hub.write_gatt_char = write
     try:
+        replace("write_gatt_char", write)
+        download = getattr(hub, "download_user_program", None)
+        if progress is not None and callable(download):
+            async def measured_download(program):
+                # Compilation is finished: use the actual MPY bundle byte count.
+                progress.begin(len(program))
+                return await download(program)
+            replace("download_user_program", measured_download)
         yield
     finally:
-        if had_override:
-            hub.write_gatt_char = previous_override
-        else:
-            del hub.write_gatt_char
+        for name, (had_override, previous) in reversed(list(originals.items())):
+            if had_override:
+                setattr(hub, name, previous)
+            else:
+                delattr(hub, name)
 
 
 def transfer_environment(hub) -> str:

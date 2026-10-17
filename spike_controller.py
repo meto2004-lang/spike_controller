@@ -38,7 +38,8 @@ from spike_core import (MAX_LINES, MAX_LINE_BYTES, MAX_HUB_LOG_BYTES,
 from spike_documents import EditorDocument, canonical_path, tab_names
 from spike_icons import ICON_PATHS, icon_pixels
 from spike_transfer import (TransferFailure, configure_ble_upload, needs_fresh_status,
-                            trace_upload_writes, transfer_environment, wait_hub_idle)
+                            trace_upload_writes, transfer_environment, wait_hub_idle,
+                            upload_progress, finish_upload_progress)
 
 # مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -101,6 +102,7 @@ def to_visual(text: str) -> str:
 DEFAULTS = {
     "geometry": "1220x780",
     "sash": 440,
+    "editor_fraction": 0.78,
     "timestamps": True,
     "autolog": True,
     "scan_timeout": 20,
@@ -185,7 +187,7 @@ HELP_TEXT = """\
    Ctrl+N/O/S تبويب جديد/فتح/حفظ | Ctrl+Shift+S حفظ باسم
    Ctrl+W إغلاق التبويب | Ctrl+Tab / Ctrl+Shift+Tab تنقل
    Ctrl+L جلسة جديدة ومسح البيانات
-   Ctrl+Shift+C نسخ المحدد من الكونسول (أو زر يمين في الكونسول)
+   Ctrl+Shift+C نسخ المحدد من الكونسول دون الوقت (أو زر يمين في الكونسول)
 
 7) الكونسول:
    - حدّد أي نص بالفأرة وانسخه (Ctrl+C أو قائمة يمين)
@@ -317,6 +319,9 @@ class App:
         self._pressed_close = None
         self._sending_path = None
         self._send_op_id = None
+        self._upload_progress_id = None
+        self._upload_state = "idle"
+        self._upload_percent = 0
         self.rx_count = 0
         # نسخة خام من أسطر الكونسول (بلا تحويل العرض) لتستخدمها
         # أدوات التحليل: مولّد السباق وحفظ السجل — حتى لا تتأثر بالترتيب البصري
@@ -401,6 +406,9 @@ class App:
             self.cfg["geometry"] = self.root.geometry()
             try:
                 self.cfg["sash"] = self.paned.sashpos(0)
+                height = self.paned.winfo_height()
+                if height > 0:
+                    self.cfg["editor_fraction"] = max(0.2, min(0.9, self.cfg["sash"] / height))
             except Exception:
                 pass
             atomic_write(CONFIG_FILE, json.dumps(self.cfg, ensure_ascii=False, indent=2))
@@ -444,16 +452,9 @@ class App:
         st.configure("TCheckbutton", background=self.BG, foreground=self.FG)
         st.map("TCheckbutton", background=[("active", self.BG)])
 
-        st.configure("Toolbar.TLabelframe", background=self.PANEL, bordercolor="#3b4052",
-                     borderwidth=1, relief="solid")
-        st.configure("Toolbar.TLabelframe.Label", background=self.PANEL, foreground="#c5cede",
-                     font=("Segoe UI", 10, "bold"))
-        st.configure("Toolbar.TFrame", background=self.PANEL)
-        st.configure("ToolbarCaption.TLabel", background=self.PANEL, foreground="#a9b4c8",
-                     font=("Segoe UI", 9))
         st.configure("Toolbar.TButton", background="#34394b", foreground=self.FG,
-                     bordercolor="#454d64", borderwidth=1, padding=(10, 7),
-                     font=("Segoe UI", 10), anchor="center", relief="flat")
+                     bordercolor="#454d64", borderwidth=1, padding=(8, 4),
+                     font=("Segoe UI", 9), anchor="center", relief="flat")
         st.map("Toolbar.TButton",
                background=[("disabled", "#2a2d39"), ("pressed", "#272e42"), ("active", "#46516c")],
                foreground=[("disabled", "#70788d")],
@@ -466,6 +467,17 @@ class App:
                      bordercolor="#a64b5c")
         st.map("Stop.Toolbar.TButton",
                background=[("disabled", "#3c2c35"), ("pressed", "#6b2534"), ("active", "#a14358")])
+
+        st.configure("Toolbar.TMenubutton", background="#34394b", foreground=self.FG,
+                     padding=(8, 4), font=("Segoe UI", 9), borderwidth=1)
+        st.map("Toolbar.TMenubutton", background=[("active", "#46516c")])
+        st.configure("Upload.Horizontal.TProgressbar", background=self.OK,
+                     troughcolor=self.ENTRY_BG, borderwidth=0, thickness=6,
+                     lightcolor=self.OK, darkcolor=self.OK)
+        st.configure("Failed.Upload.Horizontal.TProgressbar", background=self.ERR,
+                     lightcolor=self.ERR, darkcolor=self.ERR)
+        st.configure("Cancelled.Upload.Horizontal.TProgressbar", background=self.WARN,
+                     lightcolor=self.WARN, darkcolor=self.WARN)
 
     def _build_ui(self) -> None:
         self.root.title("Hyena Control — تحكم روبوت SPIKE Prime (Pybricks)")
@@ -485,24 +497,36 @@ class App:
         self.lbl_send_target.pack(side="top", fill="x", padx=12, pady=(2, 4))
 
         # ---- شريط الحالة ----
-        sb = ttk.Frame(self.root, padding=(10, 4))
+        # Clam's native progress element ignores "thickness" on some Tk builds.
+        # Constrain its actual allocated height, not just its requested style.
+        self.upload_track = ttk.Frame(self.root, height=6)
+        self.upload_track.pack(side="bottom", fill="x", padx=8, pady=(0, 3))
+        self.upload_track.pack_propagate(False)
+        self.upload_bar = ttk.Progressbar(self.upload_track, orient="horizontal", mode="determinate",
+                                          maximum=100, value=0, style="Upload.Horizontal.TProgressbar")
+        self.upload_bar.pack(fill="both", expand=True)
+        sb = ttk.Frame(self.root, padding=(10, 3))
         sb.pack(side="bottom", fill="x")
-        self.lbl_state = ttk.Label(sb, text="● غير متصل", foreground=self.ERR)
-        self.lbl_state.pack(side="left")
-        self.lbl_prog = ttk.Label(sb, text="", style="Header.TLabel")
-        self.lbl_prog.pack(side="left", padx=14)
+        sb.columnconfigure(0, weight=1)
+        sb.columnconfigure(1, weight=1)
+        self.lbl_upload = ttk.Label(sb, text="0%", style="Header.TLabel", anchor="e")
+        self.lbl_upload.grid(row=0, column=5, sticky="e", padx=(8, 0))
+        self.lbl_state = ttk.Label(sb, text="● غير متصل", foreground=self.ERR, width=1)
+        self.lbl_state.grid(row=0, column=0, sticky="ew")
+        self.lbl_prog = ttk.Label(sb, text="", style="Header.TLabel", width=1)
+        self.lbl_prog.grid(row=0, column=1, sticky="ew", padx=8)
         self.chk_ts = tk.Checkbutton(sb, text="طوابع زمنية", variable=self._ts_var(),
                                      command=self._toggle_ts, bg=self.BG, fg="#9aa3b5",
                                      selectcolor=self.PANEL, activebackground=self.BG,
                                      activeforeground=self.FG)
-        self.chk_ts.pack(side="left", padx=6)
+        self.chk_ts.grid(row=0, column=2, padx=4)
         self.chk_al = tk.Checkbutton(sb, text="حفظ تلقائي", variable=self._al_var(),
                                      command=self._toggle_al, bg=self.BG, fg="#9aa3b5",
                                      selectcolor=self.PANEL, activebackground=self.BG,
                                      activeforeground=self.FG)
-        self.chk_al.pack(side="left", padx=6)
+        self.chk_al.grid(row=0, column=3, padx=4)
         self.lbl_rx = ttk.Label(sb, text="0 سطر", style="Header.TLabel")
-        self.lbl_rx.pack(side="right")
+        self.lbl_rx.grid(row=0, column=4, padx=4)
 
         # ---- منطقة رئيسية: محرر + كونسول ----
         self.paned = ttk.PanedWindow(self.root, orient="vertical")
@@ -510,21 +534,22 @@ class App:
 
         # محرر
         ed_frame = ttk.Frame(self.paned)
-        self.paned.add(ed_frame, weight=3)
+        self.paned.add(ed_frame, weight=5)
         # Keep the document identity out of the crowded connection/status bar.
         document_header = ttk.Frame(ed_frame)
         document_header.pack(fill="x", pady=(0, 2))
-        document_header.columnconfigure(0, weight=1)
+        document_header.columnconfigure(0, weight=1, minsize=120)
+        document_header.columnconfigure(1, weight=3)
         self.lbl_file = ttk.Label(document_header, text="", anchor="w", width=1,
                                   font=("Segoe UI", 10, "bold"))
         self.lbl_file.grid(row=0, column=0, sticky="ew", padx=(0, 8))
-        ttk.Button(document_header, text="+", width=3, command=self.action_new).grid(row=0, column=1)
+        ttk.Button(document_header, text="+", width=3, command=self.action_new).grid(row=0, column=2)
         ttk.Button(document_header, text=to_visual("إغلاق التبويب"),
-                   command=self.action_close_tab).grid(row=0, column=2, padx=4)
+                   command=self.action_close_tab).grid(row=0, column=3, padx=4)
         self.file_path_var = tk.StringVar(value="")
-        self.file_path_entry = ttk.Entry(ed_frame, textvariable=self.file_path_var,
-                                         state="readonly", takefocus=True)
-        self.file_path_entry.pack(fill="x", pady=(0, 4))
+        self.file_path_entry = ttk.Entry(document_header, textvariable=self.file_path_var,
+                                         state="readonly", takefocus=True, width=1)
+        self.file_path_entry.grid(row=0, column=1, sticky="ew", padx=8)
 
         self._build_tab_style()
         self.notebook = ttk.Notebook(ed_frame, style="Documents.TNotebook")
@@ -536,7 +561,7 @@ class App:
 
         # كونسول
         cs_frame = ttk.Frame(self.paned)
-        self.paned.add(cs_frame, weight=2)
+        self.paned.add(cs_frame, weight=1)
 
         cs_hdr = ttk.Frame(cs_frame)
         cs_hdr.pack(fill="x")
@@ -567,12 +592,12 @@ class App:
 
         # الكونسول: قراءة فقط مع إمكانية التحديد والنسخ + قائمة يمين
         self.console_w.bind("<Key>", self._console_key)
+        self.console_w.bind("<<Copy>>", self._on_console_copy)
         for event in ("<<Paste>>", "<<Cut>>", "<<Clear>>", "<<PasteSelection>>"):
             self.console_w.bind(event, lambda e: "break")
         self.console_w.bind("<Button-3>", self._console_menu)
 
-        # Restore after real geometry is known; the taller toolbar must not
-        # squeeze the editor down to a few pixels at the minimum window size.
+        # Restore the proportional split after real geometry is known.
         self._sash_restored = False
         self.paned.bind("<Configure>", self._layout_panes)
         self._set_file_label()
@@ -580,68 +605,63 @@ class App:
     def _layout_panes(self, event):
         if self._closing or event.height < 200:
             return
-        console_min = max(100, min(160, round(event.height * 0.3)))
+        console_min = max(80, min(130, round(event.height * 0.2)))
         upper = event.height - console_min
-        lower = min(200, upper)
-        requested = (int(self.cfg.get("sash", 440)) if not self._sash_restored
+        lower = min(180, upper)
+        requested = (round(event.height * self.cfg.get("editor_fraction", 0.78)) if not self._sash_restored
                      else self.paned.sashpos(0))
         self._sash_restored = True
         self.paned.sashpos(0, max(lower, min(requested, upper)))
 
     def _build_toolbar(self):
-        """Group controls without changing their commands or safety states."""
-        self.toolbar = ttk.Frame(self.root, padding=(8, 6, 8, 4))
+        """One compact row; secondary commands stay available in drop-downs."""
+        self.toolbar = ttk.Frame(self.root, padding=(8, 4))
         self.toolbar.pack(side="top", fill="x")
-        self.toolbar.columnconfigure(0, weight=3, uniform="toolbar")
-        self.toolbar.columnconfigure(1, weight=2, uniform="toolbar")
-        self.toolbar_groups = {}
-        for key, title, row, column, span in (
-                ("connection", "الاتصال بالروبوت", 0, 0, 2),
-                ("program", "البرامج والتشغيل", 1, 0, 1),
-                ("training", "التدريب والسجلات", 1, 1, 1)):
-            frame = ttk.LabelFrame(self.toolbar, text=to_visual(title),
-                                   style="Toolbar.TLabelframe", padding=(8, 6))
-            frame.grid(row=row, column=column, columnspan=span, sticky="nsew",
-                       padx=(0, 8) if key == "program" else 0,
-                       pady=(0, 6) if row == 0 else 0)
-            self.toolbar_groups[key] = frame
+        self.toolbar.columnconfigure(6, weight=1)
         self._build_toolbar_icons()
-        connection = self.toolbar_groups["connection"]
-        for column in range(4):
-            connection.columnconfigure(column, weight=1, uniform="connection")
-        connection.columnconfigure(4, weight=2, uniform="connection")
-        self.btn_connect = self._toolbar_button(connection, "بلوتوث", "bluetooth", self.action_connect, 0, 0)
-        self.btn_disconnect = self._toolbar_button(connection, "قطع الاتصال", "disconnect", self.action_disconnect, 0, 1)
-        self.btn_usb = self._toolbar_button(connection, "اتصال USB", "usb", self.action_usb_connect, 0, 2)
-        self.btn_serial = self._toolbar_button(connection, "استقبال COM", "serial", self.action_serial_toggle, 0, 3)
-        target = ttk.Frame(connection, style="Toolbar.TFrame")
-        target.grid(row=0, column=4, sticky="ew", padx=(8, 2))
-        ttk.Label(target, text=to_visual("اسم الروبوت / عنوان BLE"), anchor="e",
-                  style="ToolbarCaption.TLabel").pack(fill="x", pady=(0, 2))
+        self.btn_connect = self._toolbar_button(self.toolbar, "بلوتوث", "bluetooth", self.action_connect, 0, 0)
+        self.btn_disconnect = self._toolbar_button(self.toolbar, "قطع الاتصال", "disconnect", self.action_disconnect, 0, 1)
+        self.btn_send = self._toolbar_button(self.toolbar, "إرسال وتشغيل", "play", self.action_send_run, 0, 2,
+                                             style="Primary.Toolbar.TButton")
+        self.btn_stop = self._toolbar_button(self.toolbar, "إيقاف", "stop", self.action_stop, 0, 3,
+                                             style="Stop.Toolbar.TButton")
+        self.options_button = ttk.Menubutton(self.toolbar, text=to_visual("خيارات"), style="Toolbar.TMenubutton")
+        self.options_button.grid(row=0, column=4, padx=3, sticky="ns")
+        self.tools_button = ttk.Menubutton(self.toolbar, text=to_visual("أدوات"), style="Toolbar.TMenubutton")
+        self.tools_button.grid(row=0, column=5, padx=3, sticky="ns")
+        self.options_menu = tk.Menu(self.options_button, tearoff=0)
+        self.tools_menu = tk.Menu(self.tools_button, tearoff=0)
+        self.options_button.configure(menu=self.options_menu)
+        self.tools_button.configure(menu=self.tools_menu)
+        self._action_entries = {}
+        for key, title, icon, command, shortcut in (
+                ("usb", "اتصال USB", "usb", self.action_usb_connect, ""),
+                ("serial", "استقبال COM", "serial", self.action_serial_toggle, ""),
+                ("sendwait", "إرسال مع الانتظار", "wait", self.action_send_wait, "Ctrl+F5"),
+                ("dl", "تحميل فقط", "download", self.action_download_only, ""),
+                ("stored", "تشغيل المخزن", "stored", self.action_run_stored, "")):
+            self._add_toolbar_action(self.options_menu, key, title, icon, command, shortcut)
+        for key, title, icon, command, shortcut in (
+                ("race", "توليد ملف سباق", "race", self.action_race_gen, "Ctrl+G"),
+                ("clear", "جلسة جديدة / مسح", "new", self.action_clear_console, "Ctrl+L"),
+                ("export", "تصدير السجل", "export", self.action_export_log, "")):
+            self._add_toolbar_action(self.tools_menu, key, title, icon, command, shortcut)
+        target = ttk.Frame(self.toolbar)
+        target.grid(row=0, column=6, sticky="ew", padx=(8, 0))
+        ttk.Label(target, text=to_visual("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
         self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
         self.target_entry = ttk.Entry(target, textvariable=self.target_var, width=1)
-        self.target_entry.pack(fill="x")
+        self.target_entry.pack(side="left", fill="x", expand=True)
+        self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_send, self.btn_stop)
 
-        program = self.toolbar_groups["program"]
-        for column in range(3):
-            program.columnconfigure(column, weight=1, uniform="program")
-        self.btn_send = self._toolbar_button(program, "إرسال وتشغيل", "play", self.action_send_run, 0, 0,
-                                             style="Primary.Toolbar.TButton")
-        self.btn_sendwait = self._toolbar_button(program, "إرسال مع الانتظار", "wait", self.action_send_wait, 0, 1)
-        self.btn_dl = self._toolbar_button(program, "تحميل فقط", "download", self.action_download_only, 0, 2)
-        self.btn_stored = self._toolbar_button(program, "تشغيل المخزن", "stored", self.action_run_stored, 1, 0, span=2)
-        self.btn_stop = self._toolbar_button(program, "إيقاف", "stop", self.action_stop, 1, 2,
-                                             style="Stop.Toolbar.TButton")
+    def _add_toolbar_action(self, menu, key, title, icon, command, shortcut):
+        menu.add_command(label=to_visual(title), image=self._toolbar_images[icon][0], compound="left",
+                         command=command, accelerator=shortcut)
+        self._action_entries[key] = (menu, menu.index("end"))
 
-        training = self.toolbar_groups["training"]
-        for column in range(2):
-            training.columnconfigure(column, weight=1, uniform="training")
-        self.btn_race = self._toolbar_button(training, "توليد ملف سباق", "race", self.action_race_gen, 0, 0, span=2)
-        self.btn_clear = self._toolbar_button(training, "جلسة جديدة", "new", self.action_clear_console, 1, 0)
-        self.btn_export = self._toolbar_button(training, "تصدير السجل", "export", self.action_export_log, 1, 1)
-        self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_usb, self.btn_serial,
-                                self.btn_send, self.btn_sendwait, self.btn_dl, self.btn_stored,
-                                self.btn_stop, self.btn_race, self.btn_clear, self.btn_export)
+    def _configure_action(self, key, **options):
+        menu, index = self._action_entries[key]
+        menu.entryconfigure(index, **options)
 
     def _build_toolbar_icons(self):
         # Pixel glyphs avoid missing emoji/symbol fonts and scale with Tk's DPI.
@@ -660,14 +680,14 @@ class App:
     def _toolbar_button(self, parent, title, icon, command, row, column, *, span=1,
                         style="Toolbar.TButton"):
         button = ttk.Button(parent, text=to_visual(title), image=self._toolbar_images[icon],
-                            compound="left", width=1, style=style, command=command)
+                            compound="left", width=-1, style=style, command=command)
         button.grid(row=row, column=column, columnspan=span, sticky="ew", padx=3, pady=3)
         return button
 
     def _sync_serial_button(self):
         title = "إيقاف COM" if self.serial_running else "استقبال COM"
         icon = "stop" if self.serial_running else "serial"
-        self.btn_serial.configure(text=to_visual(title), image=self._toolbar_images[icon])
+        self._configure_action("serial", label=to_visual(title), image=self._toolbar_images[icon][0])
 
     def _ts_var(self):
         if not hasattr(self, "_v_ts"):
@@ -1020,8 +1040,9 @@ class App:
             if key == "c":
                 if shift:
                     self._copy_console()
-                    return "break"
-                return None  # native copy; no application shortcut needed
+                else:
+                    self._on_console_copy()
+                return "break"
             if key == "a":
                 self._select_all_console()
                 return "break"
@@ -1040,6 +1061,28 @@ class App:
                 "Shift_L", "Shift_R", "Control_L", "Control_R"):
             return None
         return "break"
+
+    def _on_console_copy(self, event=None):
+        """Copy selected output, excluding only the app's tagged timestamps.
+
+        Do not match clock-shaped strings: they may belong to robot output.
+        Dump just the selection and retain its newlines and partial lines.
+        """
+        w = self.console_w
+        selection = w.tag_ranges("sel")
+        if not selection:
+            return "break"
+        parts = []
+        for start, end in zip(selection[::2], selection[1::2]):
+            timestamp = "ts" in w.tag_names(start)
+            for kind, value, _ in w.dump(start, end, text=True, tag=True):
+                if value == "ts" and kind in ("tagon", "tagoff"):
+                    timestamp = kind == "tagon"
+                elif kind == "text" and not timestamp:
+                    parts.append(value)
+        w.clipboard_clear()
+        w.clipboard_append("".join(parts))
+        return "break"  # Never let Tk's class binding copy the timestamps again.
 
     def _copy_console(self) -> None:
         sel = self.console_w.tag_ranges("sel")
@@ -1162,9 +1205,49 @@ class App:
             if not self._closing:
                 self._poll_job = self.root.after(80, self._poll)
 
+    def _reset_upload_progress(self, op_id):
+        self._upload_progress_id = op_id
+        self._upload_state = "pending"
+        self._upload_percent = 0
+        self.upload_bar.configure(value=0, style="Upload.Horizontal.TProgressbar")
+        self.lbl_upload.configure(text="0% — " + to_visual("تحضير الرفع"))
+
+    def _handle_upload_progress(self, op_id, sent, total, complete):
+        if (op_id != self._upload_progress_id or self._upload_state not in ("pending", "uploading")
+                or type(sent) is not int or type(total) is not int or total <= 0 or not 0 <= sent <= total):
+            return
+        percent = 100 if complete is True and sent == total else min(99, sent * 100 // total)
+        if percent < self._upload_percent:
+            return
+        self._upload_percent = percent
+        self._upload_state = "complete" if percent == 100 else "uploading"
+        self.upload_bar.configure(value=self._upload_percent, style="Upload.Horizontal.TProgressbar")
+        text = ("100% — " + to_visual("اكتمل الرفع") if percent == 100
+                else f"{self._upload_percent}% | {sent}/{total} B")
+        self.lbl_upload.configure(text=text)
+
+    def _finish_progress_operation(self, op_id, error):
+        if op_id != self._upload_progress_id:
+            return
+        if self._upload_state == "complete":
+            if error is not None:
+                self.lbl_upload.configure(text="100% — " + to_visual("اكتمل الرفع؛ انتهت العملية بخطأ أو إلغاء"))
+            return  # Upload completion is separate from starting/waiting for the program.
+        if error is None:
+            self._upload_state = "unknown"
+            self.lbl_upload.configure(text=to_visual("اكتملت العملية؛ نسبة الرفع غير متاحة"))
+            return  # Never fabricate a percentage on legacy/unsupported transports.
+        cancelled = isinstance(error, (concurrent.futures.CancelledError, asyncio.CancelledError))
+        self._upload_state = "cancelled" if cancelled else "failed"
+        style = "Cancelled" if cancelled else "Failed"
+        self.upload_bar.configure(style=style + ".Upload.Horizontal.TProgressbar")
+        self.lbl_upload.configure(text=f"{self._upload_percent}% — " + to_visual("أُلغي الرفع" if cancelled else "فشل الرفع"))
+
     def _handle_msg(self, msg) -> None:
         kind = msg[0]
-        if kind == "console":
+        if kind == "upload_progress":
+            self._handle_upload_progress(*msg[1:])
+        elif kind == "console":
             _, text, tag, *source = msg
             self.console(text, tag, source=source[0] if source else "ble")
         elif kind == "hub_state":
@@ -1198,6 +1281,7 @@ class App:
         elif kind in ("op_done", "op_error"):
             _, op_id, name, res, err = msg
             self._operations.pop(op_id, None)
+            self._finish_progress_operation(op_id, err)
             if op_id == self._send_op_id:
                 self._send_op_id = None
                 self._sending_path = None
@@ -1423,6 +1507,7 @@ class App:
         else:
             await self._transfer_stage(hub, "upload-ready", lambda: wait_hub_idle(hub))
         self._download_uncertain = False
+        finish_upload_progress()
         self._say("تم رفع الملف كاملاً ✔", "ok")
 
     async def op_send_run(self, path, wait):
@@ -1498,7 +1583,9 @@ class App:
             if self._op_lock is None:
                 self._op_lock = asyncio.Lock()
             async with self._op_lock:
-                return await factory()
+                with upload_progress(lambda sent, total, complete: self.queue.put(
+                        ("upload_progress", op_id, sent, total, complete))):
+                    return await factory()
         finally:
             self._async_tasks.pop(op_id, None)
 
@@ -1543,12 +1630,12 @@ class App:
         b = self.busy
         self.btn_connect.configure(state="disabled" if (c or b) else "normal")
         self.btn_disconnect.configure(state="normal" if c else "disabled")
-        self.btn_usb.configure(state="disabled" if (c or b) else "normal")
+        self._configure_action("usb", state="disabled" if (c or b) else "normal")
         st_send = "normal" if (c and not b) else "disabled"
         self.btn_send.configure(state=st_send)
-        self.btn_sendwait.configure(state=st_send)
-        self.btn_dl.configure(state=st_send)
-        self.btn_stored.configure(state=st_send)
+        self._configure_action("sendwait", state=st_send)
+        self._configure_action("dl", state=st_send)
+        self._configure_action("stored", state=st_send)
         self.btn_stop.configure(state="normal" if (c or b) else "disabled")
 
     # ---------------- أفعال الواجهة ----------------
@@ -1676,6 +1763,7 @@ class App:
         if self._start_op(operation, factory):
             self._sending_path = path
             self._send_op_id = self._next_op
+            self._reset_upload_progress(self._send_op_id)
             self._update_send_target()
             self.console(f"إرسال الملف: {os.path.basename(path)}", "info")
             return True

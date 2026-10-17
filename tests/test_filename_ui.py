@@ -188,31 +188,34 @@ class FilenameLayoutTests(unittest.TestCase):
         self.assertTrue(self.app.lbl_send_target.winfo_ismapped())
         self.assertGreater(self.app.lbl_send_target.winfo_width(), 700)
 
-    def test_toolbar_is_grouped_and_no_controls_overlap_or_leave_the_window(self):
-        self.assertEqual(set(self.app.toolbar_groups), {'connection', 'program', 'training'})
-        self.assertEqual(len(self.app.toolbar_buttons), 12)
+    def test_toolbar_is_one_compact_row_and_no_controls_overlap_or_leave_the_window(self):
+        self.assertEqual(len(self.app.toolbar_buttons), 4)
+        self.assertEqual(set(self.app._action_entries), {'usb', 'serial', 'sendwait', 'dl', 'stored', 'race', 'clear', 'export'})
         for width, height in ((900, 560), (1220, 780), (1600, 900)):
             self.root.geometry(f'{width}x{height}')
             self.root.update()
             rectangles = []
-            for button in self.app.toolbar_buttons:
+            self.assertLessEqual(self.app.toolbar.winfo_height(), 58)
+            for button in (*self.app.toolbar_buttons, self.app.options_button, self.app.tools_button):
                 self.assertTrue(button.winfo_ismapped())
                 x = button.winfo_rootx() - self.root.winfo_rootx()
                 y = button.winfo_rooty() - self.root.winfo_rooty()
                 w, h = button.winfo_width(), button.winfo_height()
-                self.assertGreaterEqual(w, 80)
+                self.assertGreaterEqual(w, 40)
                 self.assertGreaterEqual(h, 28)
                 self.assertGreaterEqual(x, 0)
                 self.assertGreaterEqual(y, 0)
                 self.assertLessEqual(x + w, self.root.winfo_width())
                 self.assertLessEqual(y + h, self.root.winfo_height())
-                self.assertTrue(button.cget('image'))
+                self.assertEqual(button.grid_info()['row'], 0)
                 rectangles.append((x, y, x + w, y + h))
             for index, (left, top, right, bottom) in enumerate(rectangles):
                 for other_left, other_top, other_right, other_bottom in rectangles[index + 1:]:
                     self.assertFalse(left < other_right and right > other_left and top < other_bottom and bottom > other_top)
-            self.assertGreater(self.app.target_entry.winfo_width(), 150)
-            self.assertGreater(self.app.editor.winfo_height(), 30)
+            self.assertGreater(self.app.target_entry.winfo_width(), 100,
+                               [(str(w), w.winfo_reqwidth(), w.winfo_width()) for w in self.app.toolbar.winfo_children()])
+            self.assertGreater(self.app.editor.winfo_height(), 210)
+            self.assertGreater(self.app.editor.winfo_height(), self.app.console_w.winfo_height())
 
     def test_toolbar_labels_fit_and_danger_action_is_distinct(self):
         from tkinter import font
@@ -221,7 +224,7 @@ class FilenameLayoutTests(unittest.TestCase):
         for button in self.app.toolbar_buttons:
             image_name = self.root.tk.splitlist(button.cget('image'))[0]
             image_width = int(self.root.tk.call('image', 'width', image_name))
-            required = button_font.measure(button.cget('text')) + image_width + 24
+            required = button_font.measure(button.cget('text')) + image_width + 16
             self.assertGreaterEqual(button.winfo_width(), required, button.cget('text'))
         self.assertEqual(self.app.btn_send.cget('style'), 'Primary.Toolbar.TButton')
         self.assertEqual(self.app.btn_stop.cget('style'), 'Stop.Toolbar.TButton')
@@ -234,12 +237,16 @@ class FilenameLayoutTests(unittest.TestCase):
         self.app.hub = object()
         self.app._refresh_buttons()
         self.app._start_op = MagicMock(return_value=True)
-        for button, operation in ((self.app.btn_send, 'send_run'), (self.app.btn_sendwait, 'send_wait'),
-                                  (self.app.btn_dl, 'download'), (self.app.btn_stored, 'run_stored'),
-                                  (self.app.btn_stop, 'stop')):
+        for button, operation in ((self.app.btn_send, 'send_run'), (self.app.btn_stop, 'stop')):
             with self.subTest(operation=operation):
                 self.app._start_op.reset_mock()
                 button.invoke()
+                self.assertEqual(self.app._start_op.call_args.args[0], operation)
+        for key, operation in (('sendwait', 'send_wait'), ('dl', 'download'), ('stored', 'run_stored')):
+            with self.subTest(operation=operation):
+                self.app._start_op.reset_mock()
+                menu, index = self.app._action_entries[key]
+                menu.invoke(index)
                 self.assertEqual(self.app._start_op.call_args.args[0], operation)
 
     def test_disabled_upload_cannot_be_invoked_and_stop_stays_available_when_busy(self):
@@ -252,6 +259,102 @@ class FilenameLayoutTests(unittest.TestCase):
         self.assertNotIn('disabled', self.app.btn_stop.state())
         self.app.btn_stop.invoke()
         self.assertEqual(self.app._start_op.call_args.args[0], 'stop')
+
+    def add_copy_sample(self):
+        # Startup includes welcome/dependency messages; isolate the selected sample.
+        self.app.console_w.delete('1.0', 'end')
+        self.app._ts_var().set(True)
+        with patch.object(controller, 'ts', return_value='[12:34:56]'):
+            self.app.console('robot.straight(100)', 'out')
+            self.app.console('[01:02:03] robot time\nrobot.turn(90)', 'info')
+        self.app._select_all_console()
+        self.root.update()
+        return 'robot.straight(100)\n[01:02:03] robot time\nrobot.turn(90)\n'
+
+    def test_console_copy_event_excludes_only_app_time_and_keeps_logs_unchanged(self):
+        expected = self.add_copy_sample()
+        displayed = self.app.console_w.get('1.0', 'end-1c')
+        raw, training = self.app.console_raw[:], self.app.training_lines[:]
+        self.app.console_w.event_generate('<<Copy>>')
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), expected)
+        self.assertEqual(self.app.console_w.get('1.0', 'end-1c'), displayed)
+        self.assertEqual(self.app.console_raw, raw)
+        self.assertEqual(self.app.training_lines, training)
+
+    def test_console_ctrl_c_and_copy_button_use_filtered_clipboard(self):
+        expected = self.add_copy_sample()
+        self.root.focus_force()
+        self.app.console_w.focus_set()
+        self.root.update()
+        self.app.console_w.event_generate('<Control-KeyPress-c>')
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), expected)
+        self.root.clipboard_clear()
+        self.app._copy_console()  # Also the header button / Ctrl+Shift+C callback.
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), expected)
+
+    def test_console_copy_handles_partial_timestamp_selection_and_empty_output(self):
+        self.add_copy_sample()
+        widget = self.app.console_w
+        widget.tag_remove('sel', '1.0', 'end')
+        widget.tag_add('sel', '1.4', '2.4')
+        widget.event_generate('<<Copy>>')
+        self.assertEqual(self.root.clipboard_get(), 'robot.straight(100)\n')
+        widget.tag_remove('sel', '1.0', 'end')
+        widget.tag_add('sel', '1.1', '1.5')
+        widget.event_generate('<<Copy>>')
+        self.assertEqual(self.root.clipboard_get(), '')
+
+    def test_console_copy_after_timestamp_toggle_and_clear(self):
+        self.add_copy_sample()
+        widget = self.app.console_w
+        widget.delete('1.0', 'end')
+        self.app._ts_var().set(False)
+        self.app.console('[12:34:56] from robot')
+        self.app._ts_var().set(True)
+        self.app.console('next')
+        self.app._select_all_console()
+        widget.event_generate('<<Copy>>')
+        self.assertEqual(self.root.clipboard_get(), '[12:34:56] from robot\nnext\n')
+
+    def test_editor_copy_keeps_clock_text_and_is_not_console_filtered(self):
+        source = 'print("[12:34:56]")\n'
+        self.app.editor.delete('1.0', 'end')
+        self.app.editor.insert('1.0', source)
+        self.app.editor.tag_add('sel', '1.0', 'end-1c')
+        self.app.editor.event_generate('<<Copy>>')
+        self.root.update()
+        self.assertEqual(self.root.clipboard_get(), source)
+
+    def test_upload_bar_is_thin_green_and_at_the_very_bottom(self):
+        bar = self.app.upload_bar
+        self.assertTrue(bar.winfo_ismapped())
+        self.assertLessEqual(bar.winfo_height(), 10)
+        self.assertEqual(bar.winfo_width(), self.root.winfo_width() - 16)
+        self.assertLessEqual(self.root.winfo_rooty() + self.root.winfo_height() - bar.winfo_rooty(), 14)
+        self.app._reset_upload_progress(123)
+        self.app._handle_msg(('upload_progress', 123, 43, 100, False))
+        self.root.update()
+        self.assertEqual(float(bar.cget('value')), 43)
+        style = controller.ttk.Style(self.root)
+        self.assertEqual(style.lookup(bar.cget('style'), 'background'), self.app.OK)
+        self.app._handle_msg(('upload_progress', 123, 100, 100, False))
+        self.assertEqual(float(bar.cget('value')), 99)
+        self.app._handle_msg(('upload_progress', 123, 100, 100, True))
+        self.assertEqual(float(bar.cget('value')), 100)
+
+    def test_secondary_upload_menu_is_disabled_during_transfer(self):
+        self.app.connected, self.app.hub, self.app.busy = True, object(), True
+        self.app._refresh_buttons()
+        self.app._start_op = MagicMock()
+        for key in ('usb', 'sendwait', 'dl', 'stored'):
+            menu, index = self.app._action_entries[key]
+            self.assertEqual(menu.entrycget(index, 'state'), 'disabled')
+            menu.invoke(index)
+        self.app._start_op.assert_not_called()
+        self.assertNotIn('disabled', self.app.btn_stop.state())
 
     def test_only_file_tabs_remain_and_arabic_source_is_unmodified(self):
         self.assertFalse(hasattr(self.app, 'arabic_preview'))
