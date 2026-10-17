@@ -220,19 +220,30 @@ class Dialogs:
     def __init__(self, parent):
         self.parent = parent
 
+    def _box(self, title, text, icon, buttons, default=None):
+        box = QMessageBox(self.parent)
+        box.setWindowTitle(title)
+        box.setIcon(icon)
+        box.setTextFormat(Qt.TextFormat.PlainText)
+        box.setText(text)
+        box.setStandardButtons(buttons)
+        if default is not None:
+            box.setDefaultButton(default)
+        return box.exec()
+
     def showerror(self, title, text, **_):
-        QMessageBox.critical(self.parent, title, text)
+        self._box(title, text, QMessageBox.Icon.Critical, QMessageBox.StandardButton.Ok)
 
     def showinfo(self, title, text, **_):
-        QMessageBox.information(self.parent, title, text)
+        self._box(title, text, QMessageBox.Icon.Information, QMessageBox.StandardButton.Ok)
 
     def askyesno(self, title, text, **_):
-        return QMessageBox.question(self.parent, title, text,
+        return self._box(title, text, QMessageBox.Icon.Question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No) == QMessageBox.StandardButton.Yes
 
     def askyesnocancel(self, title, text):
-        answer = QMessageBox.question(self.parent, title, text,
+        answer = self._box(title, text, QMessageBox.Icon.Question,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel)
         if answer == QMessageBox.StandardButton.Cancel:
@@ -302,7 +313,7 @@ class QtApp(backend.App):
         self.window.setFont(QFont('Segoe UI', 10))
         self.window.setStyleSheet('''
             QWidget {background:#1e1f26; color:#e8e9ed;}
-            QPlainTextEdit,QLineEdit {background:#14151b; border:1px solid #34394b;
+            QPlainTextEdit,QTextEdit,QLineEdit {background:#14151b; border:1px solid #34394b;
                 selection-background-color:#346bd5; padding:3px;}
             QPushButton,QToolButton,QComboBox {background:#34394b; border:1px solid #454d64;
                 border-radius:3px; padding:5px 8px;}
@@ -406,7 +417,7 @@ class QtApp(backend.App):
         self.file_path_var = Value(path)
         header.addWidget(path, 3)
         self.direction_combo = QComboBox()
-        self.direction_combo.addItems(['اتجاه تلقائي', 'يسار ← يمين', 'يمين ← يسار'])
+        self.direction_combo.addItems(['اتجاه تلقائي', 'يسار إلى يمين · LTR', 'يمين إلى يسار · RTL'])
         self.direction_combo.setToolTip('اتجاه العرض فقط؛ لا يغيّر النص المحفوظ')
         self.direction_combo.currentIndexChanged.connect(self._change_direction)
         header.addWidget(self.direction_combo)
@@ -599,6 +610,7 @@ class QtApp(backend.App):
     def action_help(self):
         dialog = QDialog(self.window)
         dialog.setWindowTitle('شرح الاستخدام')
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         dialog.resize(750, 600)
         layout = QVBoxLayout(dialog)
         view = Console()
@@ -608,7 +620,13 @@ class QtApp(backend.App):
         self.help_dialog = dialog
 
     def action_race_gen(self):
-        self.race_windows.append(RaceWindow(self))
+        if self._closing or self._confirming_close:
+            return
+        race = RaceWindow(self)
+        self.race_windows.append(race)
+        race.win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        race.win.finished.connect(lambda _: self.race_windows.remove(race)
+                                  if race in self.race_windows else None)
 
 
 def run(smoke=False):

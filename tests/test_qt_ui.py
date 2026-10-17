@@ -85,6 +85,13 @@ class QtArabicTests(unittest.TestCase):
         line = editor.document().begin().layout().lineAt(0)
         self.assertGreater(x_at(line, 1), x_at(line, 3))
 
+    def test_arabic_editor_paragraphs_are_right_aligned_not_only_shaped(self):
+        _, editor = self.new_source('مرحبا بالعالم\nprint("hello")\n# تعليق عربي')
+        for number in (0, 2):
+            block = editor.document().findBlockByNumber(number)
+            cursor = QTextCursor(block)
+            self.assertGreater(editor.cursorRect(cursor).x(), editor.viewport().width() // 2)
+
     def test_native_python_structure_ltr_and_inline_arabic_rtl(self):
         source = 'print("مرحبا بالعالم")'
         _, editor = self.new_source(source)
@@ -193,6 +200,15 @@ class QtArabicTests(unittest.TestCase):
         view.copy()
         self.assertEqual(self.qt.clipboard().text(), '[سلك] robot.straight(100)\nمرحبا بالعالم\n')
 
+    def test_arabic_console_is_actually_right_aligned_and_latin_remains_left(self):
+        view = self.console_sample('مرحبا بالعالم\nrobot.turn(90)')
+        first = view.document().begin()
+        line = first.layout().lineAt(0)
+        self.assertGreater(x_at(line, 10), x_at(line, 12))
+        self.assertGreater(line.naturalTextRect().right(), view.viewport().width() // 2)
+        latin = first.next().layout().lineAt(0)
+        self.assertLess(latin.naturalTextRect().left(), 20)
+
     def test_console_is_read_only_and_paste_cannot_modify_it(self):
         view = self.console_sample('مرحبا')
         before = raw_text(view.document())
@@ -290,6 +306,18 @@ class QtArabicTests(unittest.TestCase):
     def test_shared_backend_keeps_transport_methods_unchanged(self):
         for name in ('op_send_run', 'op_download_only', '_quiet_stop', '_execute_op', '_start_op'):
             self.assertIs(getattr(QtApp, name), getattr(controller.App, name))
+
+    def test_closing_main_window_closes_owned_dialogs_and_stops_poll_timers(self):
+        self.app.action_help()
+        self.app.console('robot.straight(100)')
+        self.app.action_race_gen()
+        dialog = self.app.help_dialog
+        race = self.app.race_windows[-1]
+        self.app._closing = True
+        self.app.root.destroy()
+        self.assertFalse(dialog.isVisible())
+        self.assertFalse(race.win.isVisible())
+        self.assertFalse(self.app.root.timers)
 
     def test_import_and_default_entry_use_qt_without_requesting_tk(self):
         with patch('spike_qt.run', return_value=0) as run:

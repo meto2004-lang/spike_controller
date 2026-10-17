@@ -8,7 +8,7 @@ import unicodedata
 from PySide6.QtCore import QMimeData, QRect, QSize, Qt
 from PySide6.QtGui import (QColor, QFont, QKeySequence, QPainter, QSyntaxHighlighter,
                            QTextCharFormat, QTextCursor, QTextFormat)
-from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QWidget
+from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
 
 TIMESTAMP = int(QTextFormat.Property.UserProperty) + 1
 
@@ -125,13 +125,16 @@ class CodeEditor(QPlainTextEdit):
         super().keyPressEvent(event)
 
 
-class Console(QPlainTextEdit):
+class Console(QTextEdit):
     """Read-only native RTL paragraphs; timestamps are format metadata only."""
     def __init__(self, parent=None, maximum_blocks=20000):
         super().__init__(parent)
         self.setReadOnly(True)
+        self.setAcceptRichText(False)
         self.setUndoRedoEnabled(False)
-        self.setMaximumBlockCount(maximum_blocks + 1)
+        # QTextEdit honors per-paragraph direction/alignment. QPlainTextEdit's
+        # layout ignores block alignment and cannot right-align mixed log lines.
+        self.document().setMaximumBlockCount(maximum_blocks + 1)
         self.setFont(QFont('DejaVu Sans Mono', 11))
         self.extra_actions = []
 
