@@ -92,6 +92,16 @@ class QtArabicTests(unittest.TestCase):
             cursor = QTextCursor(block)
             self.assertGreater(editor.cursorRect(cursor).x(), editor.viewport().width() // 2)
 
+    def test_right_aligned_editor_hit_testing_maps_back_to_logical_arabic(self):
+        _, editor = self.new_source('مرحبا بالعالم')
+        cursor = QTextCursor(editor.document())
+        cursor.setPosition(2)
+        point = editor.cursorRect(cursor).center()
+        self.assertLessEqual(abs(editor.cursorForPosition(point).position() - 2), 1)
+        QTest.mouseDClick(editor.viewport(), Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier, point)
+        self.assertEqual(editor.textCursor().selectedText(), 'مرحبا')
+
     def test_native_python_structure_ltr_and_inline_arabic_rtl(self):
         source = 'print("مرحبا بالعالم")'
         _, editor = self.new_source(source)
@@ -205,7 +215,9 @@ class QtArabicTests(unittest.TestCase):
         first = view.document().begin()
         line = first.layout().lineAt(0)
         self.assertGreater(x_at(line, 10), x_at(line, 12))
-        self.assertGreater(line.naturalTextRect().right(), view.viewport().width() // 2)
+        cursor = QTextCursor(first)
+        cursor.setPosition(10)
+        self.assertGreater(view.cursorRect(cursor).x(), view.viewport().width() // 2)
         latin = first.next().layout().lineAt(0)
         self.assertLess(latin.naturalTextRect().left(), 20)
 

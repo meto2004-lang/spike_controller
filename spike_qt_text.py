@@ -5,7 +5,7 @@ import keyword
 import re
 import unicodedata
 
-from PySide6.QtCore import QMimeData, QRect, QSize, Qt
+from PySide6.QtCore import QMimeData, QPointF, QRect, QSize, Qt
 from PySide6.QtGui import (QColor, QFont, QKeySequence, QPainter, QSyntaxHighlighter,
                            QTextCharFormat, QTextCursor, QTextFormat)
 from PySide6.QtWidgets import QApplication, QMenu, QPlainTextEdit, QTextEdit, QWidget
@@ -112,6 +112,30 @@ class CodeEditor(QPlainTextEdit):
                                  Qt.AlignmentFlag.AlignRight, str(block.blockNumber() + 1))
             block = block.next()
             top += height
+
+    def paintEvent(self, event):
+        # QPlainTextDocumentLayout ignores per-block alignment. Position its
+        # native QTextLines instead: shaping, hit testing and caret mapping stay
+        # in Qt, with no document-format edits or undo-history pollution.
+        margin = self.document().documentMargin()
+        available = self.viewport().width() - 2 * margin
+        block = self.firstVisibleBlock()
+        while block.isValid():
+            rect = self.blockBoundingGeometry(block).translated(self.contentOffset())
+            if rect.top() > self.viewport().height():
+                break
+            self.blockBoundingRect(block)  # Ensure the native layout is current.
+            direction = (direction_for(block.text()) if self.text_direction ==
+                         Qt.LayoutDirection.LayoutDirectionAuto else self.text_direction)
+            layout = block.layout()
+            for index in range(layout.lineCount()):
+                line = layout.lineAt(index)
+                x = margin
+                if direction == Qt.LayoutDirection.RightToLeft:
+                    x += max(0, available - line.naturalTextWidth())
+                line.setPosition(QPointF(x, line.y()))
+            block = block.next()
+        super().paintEvent(event)
 
     def createMimeDataFromSelection(self):
         data = QMimeData()
