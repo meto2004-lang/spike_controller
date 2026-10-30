@@ -12,6 +12,7 @@
   <link rel="stylesheet" href="/vendor/codemirror/addon/fold/foldgutter.css">
   <link rel="stylesheet" href="/vendor/codemirror/addon/lint/lint.css">
   <link rel="stylesheet" href="/css/app.css">
+  <link rel="stylesheet" href="/css/blocks.css">
 </head>
 <body>
 
@@ -130,6 +131,9 @@
       <button class="menu-item" id="menu-new" role="menuitem">
         <svg><use href="#i-file-add"/></svg><span data-i18n="action.newFile">ملف جديد</span><span class="shortcut">Ctrl+N</span>
       </button>
+      <button class="menu-item" id="menu-new-blocks" role="menuitem">
+        <svg><use href="#i-examples"/></svg><span data-i18n="blocks.new">برنامج بالكتل</span>
+      </button>
       <button class="menu-item" id="menu-open" role="menuitem">
         <svg><use href="#i-folder"/></svg><span data-i18n="action.openFile">فتح…</span><span class="shortcut">Ctrl+O</span>
       </button>
@@ -191,14 +195,21 @@
         <div class="tabs" id="tabs" role="tablist"></div>
         <button class="tab-add" id="tab-add" data-i18n-title="action.newFile">+</button>
         <div class="tabbar-spacer"></div>
+        <div class="mode-switch" id="mode-switch" role="tablist" hidden>
+          <button type="button" role="tab" data-mode="blocks" data-i18n="blocks.modeBlocks">الكتل</button>
+          <button type="button" role="tab" data-mode="python" data-i18n="blocks.modePython">بايثون</button>
+        </div>
         <div class="tabbar-tools">
           <button id="btn-save" data-i18n-title="action.save"><svg><use href="#i-save"/></svg></button>
           <button id="btn-search" data-i18n-title="action.find"><svg><use href="#i-search"/></svg></button>
+          <button id="btn-convert" data-i18n-title="blocks.convert" hidden><svg><use href="#i-external"/></svg></button>
         </div>
       </div>
 
       <div class="editor-wrap" id="editor-wrap">
         <textarea id="code-fallback" class="visually-hidden" spellcheck="false"></textarea>
+        <div class="blocks-host" id="blocks-host" hidden></div>
+        <div class="code-preview-host" id="code-preview" hidden></div>
       </div>
 
       <div class="resizer" id="resizer" role="separator" aria-orientation="horizontal" tabindex="0"></div>
@@ -458,6 +469,7 @@
 <script src="/vendor/codemirror/addon/lint/lint.js"></script>
 <script src="/js/i18n.js"></script>
 <script src="/js/editor.js"></script>
+<script src="/js/blocks.js"></script>
 <script src="/js/app.js"></script>
 </body>
 </html>

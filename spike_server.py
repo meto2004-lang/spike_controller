@@ -33,7 +33,7 @@ from spike_race import TrainingError, TrainingSession
 from spike_templates import EXAMPLES, STARTER_PROGRAM
 from spike_workspace import Workspace, WorkspaceError
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 MAX_BODY_BYTES = 8 * 1024 * 1024
 LOG_BUFFER = 4000
 

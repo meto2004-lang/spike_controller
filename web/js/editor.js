@@ -172,16 +172,21 @@
 
   // -- documents ------------------------------------------------------
   EditorManager.prototype.addDocument = function (spec) {
+    var kind = spec.kind === "blocks" ? "blocks" : "python";
     var content = spec.content === undefined ? "" : spec.content;
-    var cmDoc = CodeMirror.Doc(content, "python");
+    var cmDoc = kind === "python" ? CodeMirror.Doc(content, "python") : null;
     var doc = {
       id: this.nextId++,
+      kind: kind,
       name: spec.name || "program.py",
       path: spec.path || null,
       cmDoc: cmDoc,
-      savedContent: spec.savedContent === undefined
-        ? (spec.path ? content : "")
-        : spec.savedContent
+      blocks: spec.blocks || null,
+      viewMode: kind === "blocks" ? "blocks" : "python",
+      dirtyBlocks: false,
+      savedContent: kind === "python"
+        ? (spec.savedContent === undefined ? (spec.path ? content : "") : spec.savedContent)
+        : ""
     };
     this.docs.push(doc);
     if (this.activeId === null) this.activate(doc.id, { force: true });
@@ -209,18 +214,23 @@
     if (this.activeId === id && !opts.force) return target;
     this.activeId = id;
     this._suppress = true;
-    this.cm.swapDoc(target.cmDoc);
-    this.cm.setOption("mode", "python");
-    this._suppress = false;
-    var top = this._scrollTops.get(id) || 0;
-    var cm = this.cm;
-    requestAnimationFrame(function () { cm.scrollTo(null, top); cm.focus(); });
-    this.cm.performLint();
-    if (this.options.onDocs) this.options.onDocs();
-    if (this.options.onCursor) {
-      var cursor = this.cm.getCursor();
-      this.options.onCursor({ line: cursor.line + 1, ch: cursor.ch + 1 });
+    if (target.kind === "python") {
+      this.cm.swapDoc(target.cmDoc);
+      this.cm.setOption("mode", "python");
     }
+    this._suppress = false;
+    if (target.kind === "python") {
+      var top = this._scrollTops.get(id) || 0;
+      var cm = this.cm;
+      requestAnimationFrame(function () { cm.scrollTo(null, top); cm.focus(); });
+      this.cm.performLint();
+      if (this.options.onCursor) {
+        var cursor = this.cm.getCursor();
+        this.options.onCursor({ line: cursor.line + 1, ch: cursor.ch + 1 });
+      }
+    }
+    if (this.options.onDocs) this.options.onDocs();
+    if (this.options.onActivate) this.options.onActivate(target, current);
     return target;
   };
 
@@ -265,12 +275,15 @@
     if (!doc) return;
     if (info && info.name) doc.name = info.name;
     if (info && info.path) doc.path = info.path;
-    doc.savedContent = doc.cmDoc.getValue();
+    if (doc.kind === "blocks") doc.dirtyBlocks = false;
+    else doc.savedContent = doc.cmDoc.getValue();
     if (this.options.onDocs) this.options.onDocs();
   };
 
   EditorManager.prototype.isDirty = function (doc) {
-    return !!doc && doc.cmDoc.getValue() !== doc.savedContent;
+    if (!doc) return false;
+    if (doc.kind === "blocks") return !!doc.dirtyBlocks;
+    return doc.cmDoc.getValue() !== doc.savedContent;
   };
 
   EditorManager.prototype._changed = function () {

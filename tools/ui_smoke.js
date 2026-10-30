@@ -47,7 +47,7 @@ if (!window.HTMLElement.prototype.showModal) {
 }
 
 const bootstrap = {
-  version: "2.0.0",
+  version: "2.1.0",
   simulation: true,
   pybricksdev: false,
   settings: { lang: "ar", theme: "light", font_size: 14, retries: 6, scan_timeout: 20,
@@ -121,7 +121,12 @@ FakeCM.prototype.replaceSelection = function () {};
 FakeCM.prototype.indentSelection = function () {};
 FakeCM.prototype.showHint = function () {};
 FakeCM.prototype.getSelection = function () { return ""; };
-window.CodeMirror = function (host, options) { return new FakeCM(host, options); };
+window.__cms = [];
+window.CodeMirror = function (host, options) {
+  const cm = new FakeCM(host, options);
+  window.__cms.push({ host, cm });
+  return cm;
+};
 window.CodeMirror.Doc = function (text, mode) { return new Doc(text, mode); };
 window.CodeMirror.Pos = function (line, ch) { return { line, ch }; };
 window.CodeMirror.registerHelper = function () {};
@@ -134,6 +139,7 @@ function load(file) {
 }
 load("js/i18n.js");
 load("js/editor.js");
+load("js/blocks.js");
 load("js/app.js");
 
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -214,6 +220,65 @@ const assert = (condition, message) => {
   window.document.querySelector("#btn-race-generate").click();
   await wait(60);
   assert(window.document.querySelector("#dlg-race").open === true, "race dialog opened from drawer/menu");
+
+  // ---- block programming mode ---------------------------------------------
+  window.document.querySelector("#dlg-race").close();
+  const tabsBefore = window.document.querySelectorAll(".tab").length;
+  window.document.querySelector("#menu-new-blocks").click();
+  await wait(50);
+  assert(window.document.querySelectorAll(".tab").length === tabsBefore + 1, "block tab added");
+  assert(!!window.document.querySelector(".tab.tab-blocks"), "block tab is marked");
+  assert(window.document.querySelector("#mode-switch").hidden === false, "mode switch shown");
+  assert(window.document.querySelector("#blocks-host").hidden === false, "block canvas shown");
+  assert(window.document.querySelector("#btn-convert").hidden === false, "convert button shown");
+  assert(window.document.querySelectorAll(".blk-palette-item").length === 15,
+         "palette lists every block type");
+  assert(!!window.document.querySelector(".blk-hat"), "set up hat block rendered");
+  assert(window.document.querySelector("#blocks-host").textContent.includes("Program"),
+         "program hat rendered");
+
+  // add the first palette block (keyboard path: jsdom has no pointer events)
+  window.document.querySelectorAll(".blk-palette-item")[0]
+    .dispatchEvent(new window.KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+  await wait(30);
+  assert(window.document.querySelectorAll(".blk-stack .blk").length === 1,
+         "palette block added to the program");
+  const textInput = window.document.querySelector(".blk-stack .blk input.blk-input");
+  assert(!!textInput, "print block exposes an editable field");
+  if (textInput) {
+    textInput.value = "Hello from blocks";
+    textInput.dispatchEvent(new window.Event("input", { bubbles: true }));
+  }
+  await wait(30);
+  assert(!!window.document.querySelector(".tab.tab-blocks.dirty"), "editing a block marks the tab dirty");
+
+  // generated python preview
+  window.document.querySelector('#mode-switch button[data-mode="python"]').click();
+  await wait(30);
+  assert(window.document.querySelector("#blocks-host").hidden === true, "blocks hidden in python view");
+  assert(window.document.querySelector("#code-preview").hidden === false, "python preview shown");
+  const preview = window.__cms.filter((entry) => entry.host.id === "code-preview").pop();
+  assert(!!preview, "python preview editor created");
+  if (preview) {
+    const generated = preview.cm.getValue();
+    assert(generated.includes("from pybricks.hubs import PrimeHub"), "setup code generated");
+    assert(generated.includes("robot = DriveBase("), "drive base configured");
+    assert(generated.includes('print("Hello from blocks")'), "edited field reaches the python");
+  }
+
+  // back to blocks, then convert into a python tab
+  window.document.querySelector('#mode-switch button[data-mode="blocks"]').click();
+  await wait(30);
+  assert(window.document.querySelector("#blocks-host").hidden === false, "blocks come back");
+
+  const tabsBeforeConvert = window.document.querySelectorAll(".tab").length;
+  window.document.querySelector("#btn-convert").click();
+  await wait(80);
+  assert(window.document.querySelectorAll(".tab").length === tabsBeforeConvert + 1,
+         "converted python tab opened");
+  assert(!window.document.querySelector(".tab.active.tab-blocks"), "python tab becomes active");
+  assert(window.document.querySelector("#mode-switch").hidden === true, "mode switch hidden for python");
+  assert(window.document.querySelector("#blocks-host").hidden === true, "canvas hidden for python");
 
   console.log(errors.length ? "FAILURES:\n" + errors.join("\n") : "UI SMOKE OK");
   console.log("tabs:", window.document.querySelectorAll(".tab").length,

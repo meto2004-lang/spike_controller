@@ -12,7 +12,7 @@ import time
 from spike_core import atomic_write
 
 MAX_FILE_BYTES = 2 * 1024 * 1024
-ALLOWED_SUFFIXES = (".py", ".txt", ".json", ".csv", ".md")
+ALLOWED_SUFFIXES = (".py", ".txt", ".json", ".csv", ".md", ".blocks")
 
 
 class WorkspaceError(RuntimeError):
@@ -28,7 +28,7 @@ def _safe_name(name: str) -> str:
     if "/" in name or "\\" in name:
         raise WorkspaceError("invalid file name")
     if os.path.splitext(name)[1].lower() not in ALLOWED_SUFFIXES:
-        raise WorkspaceError("only .py, .txt, .json, .csv and .md files are allowed")
+        raise WorkspaceError("only .py, .txt, .json, .csv, .md and .blocks files are allowed")
     return name
 
 

@@ -25,6 +25,8 @@
     scanning: false,
     scanTimer: null,
     editor: null,
+    blockView: null,
+    previewCM: null,
     autoScroll: true,
     renderTimer: null
   };
@@ -137,6 +139,7 @@
     $("#btn-theme").firstElementChild.firstElementChild.setAttribute(
       "href", theme === "dark" ? "#i-sun" : "#i-moon");
     if (state.editor) state.editor.setTheme(theme === "dark");
+    if (state.previewCM) state.previewCM.setOption("theme", theme === "dark" ? "hyena-dark" : "hyena");
   }
 
   function applyFontSize(size) {
@@ -152,6 +155,7 @@
     renderShortcuts();
     renderDrawer();
     renderHub();
+    if (state.blockView) state.blockView.setLanguage(lang);
     renderTraining();
     rerenderConsole();
     if (persist) saveSettings({ lang: lang });
@@ -336,7 +340,8 @@
         closeDocument(doc);
       });
       var tab = el("div", {
-        class: "tab" + (doc.id === state.editor.activeId ? " active" : "") + (dirty ? " dirty" : ""),
+        class: "tab" + (doc.kind === "blocks" ? " tab-blocks" : "") +
+          (doc.id === state.editor.activeId ? " active" : "") + (dirty ? " dirty" : ""),
         role: "tab",
         tabindex: "0",
         title: doc.name + (doc.path ? "\n" + doc.path : "")
@@ -358,6 +363,109 @@
     document.title = active
       ? (state.editor.isDirty(active) ? "• " : "") + active.name + " — Hyena Control"
       : "Hyena Control";
+  }
+
+  function docCode(doc) {
+    if (!doc) return "";
+    if (doc.kind === "blocks") return window.HyenaBlocks.generate(doc.blocks);
+    return doc.cmDoc.getValue();
+  }
+
+  function destroyBlockView() {
+    if (state.blockView) {
+      state.blockView.destroy();
+      state.blockView = null;
+    }
+  }
+
+  function previewEditor() {
+    if (!state.previewCM) {
+      state.previewCM = window.CodeMirror($("#code-preview"), {
+        value: "",
+        mode: "python",
+        theme: document.documentElement.getAttribute("data-theme") === "dark" ? "hyena-dark" : "hyena",
+        lineNumbers: true,
+        readOnly: true,
+        lineWrapping: false,
+        styleActiveLine: false,
+        gutters: ["CodeMirror-linenumbers"]
+      });
+    }
+    return state.previewCM;
+  }
+
+  function updatePreview(doc) {
+    var cm = previewEditor();
+    cm.setValue(docCode(doc));
+    cm.refresh();
+  }
+
+  function showActiveDoc(doc) {
+    var mainWrapper = state.editor ? state.editor.cm.getWrapperElement() : null;
+    var modeSwitch = $("#mode-switch");
+    var convert = $("#btn-convert");
+    var isBlocks = !!doc && doc.kind === "blocks";
+    modeSwitch.hidden = !isBlocks;
+    convert.hidden = !isBlocks;
+    if (!isBlocks) {
+      if (mainWrapper) mainWrapper.style.display = "";
+      $("#blocks-host").hidden = true;
+      $("#code-preview").hidden = true;
+      destroyBlockView();
+      if (state.editor) state.editor.refresh();
+      return;
+    }
+    var pythonView = doc.viewMode === "python";
+    Array.prototype.forEach.call(modeSwitch.querySelectorAll("button"), function (button) {
+      var active = button.dataset.mode === doc.viewMode;
+      button.classList.toggle("active", active);
+      button.setAttribute("aria-selected", active ? "true" : "false");
+    });
+    if (mainWrapper) mainWrapper.style.display = "none";
+    $("#blocks-host").hidden = pythonView;
+    $("#code-preview").hidden = !pythonView;
+    if (pythonView) {
+      destroyBlockView();
+      updatePreview(doc);
+    } else {
+      $("#blocks-host").innerHTML = "";
+      state.blockView = new window.HyenaBlocks.BlockView($("#blocks-host"), {
+        model: doc.blocks,
+        lang: window.I18N.lang,
+        t: t,
+        onChange: function (model) {
+          doc.blocks = model;
+          doc.dirtyBlocks = true;
+          renderTabs();
+        }
+      });
+    }
+  }
+
+  function newBlockDocument(name) {
+    var count = state.editor.docs.filter(function (doc) { return doc.kind === "blocks"; }).length + 1;
+    var doc = state.editor.addDocument({
+      kind: "blocks",
+      name: name || "blocks_" + count + ".blocks",
+      blocks: window.HyenaBlocks.defaultModel()
+    });
+    state.editor.activate(doc.id);
+    renderTabs();
+    return doc;
+  }
+
+  function convertBlocksToPython() {
+    var doc = state.editor.active();
+    if (!doc || doc.kind !== "blocks") return;
+    var base = doc.name.replace(/\.blocks$/i, "") || "blocks";
+    var target = state.editor.addDocument({
+      kind: "python",
+      name: base + ".py",
+      content: docCode(doc)
+    });
+    state.editor.activate(target.id);
+    renderTabs();
+    toast("success", t("blocks.converted"));
   }
 
   function newDocument(content, name) {
@@ -391,19 +499,24 @@
   async function saveDocument(doc, saveAs, silent) {
     var target = doc || state.editor.active();
     if (!target) return false;
+    var isBlocks = target.kind === "blocks";
+    var suffix = isBlocks ? ".blocks" : ".py";
     var name = target.name;
     if (!target.path || saveAs) {
-      var suggestion = /\.py$/i.test(name) ? name : name + ".py";
+      var suggestion = name.replace(/\.[a-z]+$/i, "") + suffix;
       name = await askPrompt({
         title: t("prompt.saveAs"),
-        label: t("files.nameLabel"),
+        label: isBlocks ? t("blocks.fileLabel") : t("files.nameLabel"),
         value: suggestion
       });
       if (!name) return false;
-      if (!/\.py$/i.test(name)) name += ".py";
+      if (!new RegExp("\\" + suffix + "$", "i").test(name)) {
+        name = name.replace(/\.[a-z]+$/i, "") + suffix;
+      }
     }
+    var content = isBlocks ? window.HyenaBlocks.serialize(target.blocks) : target.cmDoc.getValue();
     try {
-      var res = await api("/api/files/save", { name: name, content: target.cmDoc.getValue() });
+      var res = await api("/api/files/save", { name: name, content: content });
       state.editor.markSaved(target, { name: res.name, path: res.path });
       setFiles(res.files);
       renderTabs();
@@ -577,7 +690,7 @@
       toast("warn", t("toast.busy"));
       return;
     }
-    var code = doc.cmDoc.getValue();
+    var code = docCode(doc);
     if (mode !== "stored") {
       if (!code.trim()) {
         toast("warn", t("errors.emptyProgram"));
@@ -591,7 +704,7 @@
     try {
       await api("/api/program/run", {
         code: mode === "stored" ? "" : code,
-        name: doc.name,
+        name: doc.kind === "blocks" ? doc.name.replace(/\.blocks$/i, "") + ".py" : doc.name,
         mode: mode,
         wait: !!wait
       });
@@ -756,7 +869,24 @@
         return;
       }
       var res = await api("/api/files/open", { name: name });
-      var doc = state.editor.addDocument({ name: res.name, path: res.path, content: res.content });
+      var doc;
+      if (/\.blocks$/i.test(name)) {
+        var parsed;
+        try {
+          parsed = JSON.parse(res.content);
+        } catch (err) {
+          toast("error", t("blocks.invalidFile"));
+          return;
+        }
+        doc = state.editor.addDocument({
+          kind: "blocks",
+          name: res.name,
+          path: res.path,
+          blocks: window.HyenaBlocks.normalize(parsed)
+        });
+      } else {
+        doc = state.editor.addDocument({ kind: "python", name: res.name, path: res.path, content: res.content });
+      }
       state.editor.activate(doc.id);
       renderTabs();
     } catch (err) {
@@ -851,6 +981,9 @@
     body.appendChild(el("div", { style: "display:flex;gap:6px;flex-wrap:wrap" }, [
       el("button", { class: "btn btn-sm btn-primary", onclick: function () { newDocument("", null); } }, [
         svgIcon("file-add", 15), el("span", { text: t("files.create") })
+      ]),
+      el("button", { class: "btn btn-sm btn-ghost", onclick: function () { newBlockDocument(); } }, [
+        svgIcon("examples", 15), el("span", { text: t("blocks.new") })
       ]),
       el("button", { class: "btn btn-sm btn-ghost", onclick: uploadFile }, [
         svgIcon("upload", 15), el("span", { text: t("files.upload") })
@@ -1212,6 +1345,7 @@
 
     $("#menu-new").addEventListener("click", function () { closePopovers(); newDocument("", null); });
     $("#menu-open").addEventListener("click", function () { closePopovers(); togglePanel("files"); });
+    $("#menu-new-blocks").addEventListener("click", function () { closePopovers(); newBlockDocument(); });
     $("#menu-save").addEventListener("click", function () { closePopovers(); saveDocument(null, false); });
     $("#menu-save-as").addEventListener("click", function () { closePopovers(); saveDocument(null, true); });
     $("#menu-examples").addEventListener("click", function () { closePopovers(); togglePanel("examples"); });
@@ -1220,6 +1354,15 @@
     $("#menu-help").addEventListener("click", function () { closePopovers(); openHelp(); });
 
     $("#tab-add").addEventListener("click", function () { newDocument("", null); });
+    $$("#mode-switch button").forEach(function (button) {
+      button.addEventListener("click", function () {
+        var doc = state.editor.active();
+        if (!doc || doc.kind !== "blocks") return;
+        doc.viewMode = button.dataset.mode;
+        showActiveDoc(doc);
+      });
+    });
+    $("#btn-convert").addEventListener("click", convertBlocksToPython);
     $("#btn-save").addEventListener("click", function () { saveDocument(null, false); });
     $("#btn-search").addEventListener("click", function () { state.editor.find(); });
 
@@ -1424,6 +1567,7 @@
       host: $("#editor-wrap"),
       onChange: function () { renderTabs(); },
       onDocs: renderTabs,
+      onActivate: function (doc) { showActiveDoc(doc); },
       onCursor: function (position) {
         $("#status-cursor").textContent = "Ln " + position.line + ", Col " + position.ch;
       },
