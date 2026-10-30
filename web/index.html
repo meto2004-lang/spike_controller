@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="ar" dir="rtl" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Hyena Control — SPIKE Prime IDE</title>
+  <meta name="description" content="محرر وتشغيل برامج SPIKE Prime عبر Pybricks — Hyena Control Web">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/vendor/codemirror/codemirror.css">
+  <link rel="stylesheet" href="/vendor/codemirror/addon/hint/show-hint.css">
+  <link rel="stylesheet" href="/vendor/codemirror/addon/fold/foldgutter.css">
+  <link rel="stylesheet" href="/vendor/codemirror/addon/lint/lint.css">
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+
+<!-- icon sprite ------------------------------------------------------- -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+  <defs>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-files" viewBox="0 0 24 24"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2.5h8a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-examples" viewBox="0 0 24 24"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-race" viewBox="0 0 24 24"><path d="M5 21V4m0 0h9l-1.5 3L20 9l-7.5 2L14 14H5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-help" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.6 2.3c-.7.4-1.2 1-1.2 1.9v.3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="17" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.56V21a2 2 0 1 1-4 0v-.09A1.7 1.7 0 0 0 8.9 19.3a1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.7 1.7 0 0 0 4.7 15a1.7 1.7 0 0 0-1.56-1H3a2 2 0 1 1 0-4h.09A1.7 1.7 0 0 0 4.7 8.9a1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.7 1.7 0 0 0 9 4.7a1.7 1.7 0 0 0 1-1.56V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.56 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.7 1.7 0 0 0 19.3 9v.09a1.7 1.7 0 0 0 1.56 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.51 1z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 2v2.4M12 19.6V22M2 12h2.4M19.6 12H22M4.9 4.9l1.7 1.7M17.4 17.4l1.7 1.7M19.1 4.9l-1.7 1.7M6.6 17.4l-1.7 1.7" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5 19 12 7 19.5z" fill="currentColor"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></symbol>
+    <symbol id="i-caret" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></symbol>
+    <symbol id="i-save" viewBox="0 0 24 24"><path d="M5 4h11l3 3v13H5z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M8 4v5h7V4M8 20v-6h8v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5" fill="none" stroke="currentColor" stroke-width="1.9"/><path d="m16 16 4.5 4.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12m0 0-4.5-4.5M12 15l4.5-4.5M4 19h16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-upload" viewBox="0 0 24 24"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M4 20h16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V5h6v2M6 7l1 13h10l1-13M10 11v6M14 11v6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="m4 20 4.5-1L20 7.5 16.5 4 5 15.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.6-5.9M20 4v4.5h-4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M15 5.5A1.5 1.5 0 0 0 13.5 4H6a2 2 0 0 0-2 2v7.5A1.5 1.5 0 0 0 5.5 15" fill="none" stroke="currentColor" stroke-width="1.7"/></symbol>
+    <symbol id="i-bluetooth" viewBox="0 0 24 24"><path d="M7 7.5 17 16.5 12 21V3l5 4.5L7 16.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/></symbol>
+    <symbol id="i-plug" viewBox="0 0 24 24"><path d="M9 3v5M15 3v5M6 8h12v3a6 6 0 0 1-12 0zM12 17v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="m7 10 2.5 2L7 14M12.5 14H17" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3.5 21.5 20h-19z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.5v5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="17.4" r="1.1" fill="currentColor"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 11v6" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="7.6" r="1.15" fill="currentColor"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3v4h4" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-file-add" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 3v4h4M12 11v6M9 14h6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2 2 0 0 1 5 5.5h4l2 2.5h8a2 2 0 0 1 2 2v8.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></symbol>
+    <symbol id="i-broom" viewBox="0 0 24 24"><path d="M14 4 9 9m5-5 3 3-6 6-3-3zM8.5 12 4 20l8-4.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-external" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8 8M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-signal" viewBox="0 0 24 24"><path d="M4 20v-4M9 20v-7M14 20v-10M19 20V6" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"/></symbol>
+    <symbol id="i-restart" viewBox="0 0 24 24"><path d="M4 12a8 8 0 1 0 2.6-5.9M4 4v4.5h4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-language" viewBox="0 0 24 24"><path d="M3 6h11M8.5 4v2c0 4-2.2 7.2-5 8.6M6 10c0 3 2.6 5.6 6 6.4M13 20l4-11 4 11M14.6 16.5h4.8" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+  </defs>
+</svg>
+
+<div id="app">
+
+  <!-- ================= top bar ================= -->
+  <header class="topbar">
+    <button class="icon-btn" id="btn-menu" aria-label="Menu" aria-haspopup="true" aria-expanded="false">
+      <svg><use href="#i-menu"/></svg>
+    </button>
+
+    <div class="brand">
+      <span class="brand-mark">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 18V7l4.5 6L12 6l3.5 7L20 7v11" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </span>
+      <span class="brand-name">Hyena Control<small>SPIKE PRIME IDE</small></span>
+    </div>
+
+    <button class="hub-chip" id="hub-chip" aria-haspopup="dialog" data-i18n-title="hub.openDialog">
+      <span class="dot" aria-hidden="true"></span>
+      <span class="hub-text">
+        <span class="hub-name" id="hub-name">لا يوجد روبوت متصل</span>
+        <span class="hub-sub" id="hub-sub">اضغط للاتصال</span>
+      </span>
+    </button>
+
+    <div class="spacer"></div>
+
+    <span class="sim-badge" id="sim-badge" hidden>Simulation</span>
+
+    <button class="btn btn-danger" id="btn-stop" disabled data-i18n-title="action.stop">
+      <svg><use href="#i-stop"/></svg>
+      <span class="btn-label" data-i18n="action.stop">إيقاف</span>
+    </button>
+
+    <div class="split">
+      <button class="btn btn-primary btn-main" id="btn-run" data-i18n-title="action.runTitle">
+        <svg><use href="#i-play"/></svg>
+        <span class="btn-label" data-i18n="action.run">تنزيل وتشغيل</span>
+      </button>
+      <button class="btn btn-primary btn-caret" id="btn-run-menu" aria-haspopup="true"
+              aria-expanded="false" data-i18n-title="action.moreRun">
+        <svg style="width:14px;height:14px"><use href="#i-caret"/></svg>
+      </button>
+      <div class="popover" id="run-popover" role="menu">
+        <button class="menu-item" data-run="run" role="menuitem">
+          <svg><use href="#i-play"/></svg><span data-i18n="action.run">تنزيل وتشغيل</span><span class="shortcut">F5</span>
+        </button>
+        <button class="menu-item" data-run="wait" role="menuitem">
+          <svg><use href="#i-terminal"/></svg><span data-i18n="action.runWait">تشغيل وانتظار الانتهاء</span><span class="shortcut">Ctrl+F5</span>
+        </button>
+        <button class="menu-item" data-run="download" role="menuitem">
+          <svg><use href="#i-download"/></svg><span data-i18n="action.download">تنزيل فقط</span>
+        </button>
+        <button class="menu-item" data-run="stored" role="menuitem">
+          <svg><use href="#i-restart"/></svg><span data-i18n="action.stored">تشغيل البرنامج المخزّن</span>
+        </button>
+      </div>
+    </div>
+
+    <button class="lang-btn" id="btn-lang" title="العربية / English">EN</button>
+    <button class="icon-btn" id="btn-theme" data-i18n-title="action.theme">
+      <svg><use href="#i-moon"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-settings" data-i18n-title="action.settings" aria-haspopup="dialog">
+      <svg><use href="#i-settings"/></svg>
+    </button>
+    <button class="icon-btn" id="btn-help" data-i18n-title="action.help">
+      <svg><use href="#i-help"/></svg>
+    </button>
+
+    <div class="popover" id="main-menu" role="menu" style="inset-inline-start:0;inset-inline-end:auto;top:calc(100% + 6px)">
+      <button class="menu-item" id="menu-new" role="menuitem">
+        <svg><use href="#i-file-add"/></svg><span data-i18n="action.newFile">ملف جديد</span><span class="shortcut">Ctrl+N</span>
+      </button>
+      <button class="menu-item" id="menu-open" role="menuitem">
+        <svg><use href="#i-folder"/></svg><span data-i18n="action.openFile">فتح…</span><span class="shortcut">Ctrl+O</span>
+      </button>
+      <button class="menu-item" id="menu-save" role="menuitem">
+        <svg><use href="#i-save"/></svg><span data-i18n="action.save">حفظ</span><span class="shortcut">Ctrl+S</span>
+      </button>
+      <button class="menu-item" id="menu-save-as" role="menuitem">
+        <svg><use href="#i-save"/></svg><span data-i18n="action.saveAs">حفظ باسم…</span><span class="shortcut">Ctrl+Shift+S</span>
+      </button>
+      <div class="sep"></div>
+      <button class="menu-item" id="menu-examples" role="menuitem">
+        <svg><use href="#i-examples"/></svg><span data-i18n="panel.examples">أمثلة</span>
+      </button>
+      <button class="menu-item" id="menu-race" role="menuitem">
+        <svg><use href="#i-race"/></svg><span data-i18n="panel.race">مولّد السباق</span><span class="shortcut">Ctrl+G</span>
+      </button>
+      <div class="sep"></div>
+      <button class="menu-item" id="menu-settings" role="menuitem">
+        <svg><use href="#i-settings"/></svg><span data-i18n="action.settings">الإعدادات</span>
+      </button>
+      <button class="menu-item" id="menu-help" role="menuitem">
+        <svg><use href="#i-help"/></svg><span data-i18n="action.help">المساعدة</span><span class="shortcut">F1</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= main ================= -->
+  <div class="body">
+
+    <nav class="rail" aria-label="Panels">
+      <button data-panel="files" data-i18n-title="panel.files">
+        <svg><use href="#i-files"/></svg>
+      </button>
+      <button data-panel="examples" data-i18n-title="panel.examples">
+        <svg><use href="#i-examples"/></svg>
+      </button>
+      <button data-panel="race" data-i18n-title="panel.race">
+        <svg><use href="#i-race"/></svg>
+      </button>
+      <div class="rail-sep"></div>
+      <button data-panel="help" data-i18n-title="action.help">
+        <svg><use href="#i-help"/></svg>
+      </button>
+    </nav>
+
+    <aside class="drawer" id="drawer" hidden>
+      <div class="drawer-head">
+        <span class="drawer-title" id="drawer-title">الملفات</span>
+        <span class="spacer"></span>
+        <button class="icon-btn" id="drawer-close" style="width:28px;height:28px;color:var(--muted)">
+          <svg style="width:15px;height:15px"><use href="#i-x"/></svg>
+        </button>
+      </div>
+      <div class="drawer-body" id="drawer-body"></div>
+    </aside>
+
+    <section class="editor-area">
+      <div class="tabbar">
+        <div class="tabs" id="tabs" role="tablist"></div>
+        <button class="tab-add" id="tab-add" data-i18n-title="action.newFile">+</button>
+        <div class="tabbar-spacer"></div>
+        <div class="tabbar-tools">
+          <button id="btn-save" data-i18n-title="action.save"><svg><use href="#i-save"/></svg></button>
+          <button id="btn-search" data-i18n-title="action.find"><svg><use href="#i-search"/></svg></button>
+        </div>
+      </div>
+
+      <div class="editor-wrap" id="editor-wrap">
+        <textarea id="code-fallback" class="visually-hidden" spellcheck="false"></textarea>
+      </div>
+
+      <div class="resizer" id="resizer" role="separator" aria-orientation="horizontal" tabindex="0"></div>
+
+      <section class="console" id="console">
+        <div class="console-head">
+          <button class="console-toggle" id="console-toggle">
+            <svg><use href="#i-caret"/></svg>
+            <svg style="width:15px;height:15px;color:var(--muted)"><use href="#i-terminal"/></svg>
+            <span data-i18n="console.title">المخرجات</span>
+          </button>
+          <span class="console-meta" id="console-meta"></span>
+          <span class="spacer"></span>
+          <button class="tool" id="console-autoscroll" data-i18n="console.autoscroll">تمرير تلقائي</button>
+          <button class="tool" id="console-copy" data-i18n="console.copy">نسخ</button>
+          <button class="tool" id="console-clear" data-i18n="console.clear">مسح</button>
+          <button class="tool" id="console-export" data-i18n="console.export">تصدير</button>
+        </div>
+        <div class="progress-track" id="progress-track">
+          <div class="progress-fill" id="progress-fill"></div>
+        </div>
+        <pre class="console-log" id="console-log" tabindex="0" aria-live="polite"></pre>
+      </section>
+    </section>
+  </div>
+
+  <!-- ================= status bar ================= -->
+  <footer class="statusbar">
+    <span class="item"><span class="dot" id="status-dot"></span><span id="status-connection">غير متصل</span></span>
+    <span class="item" id="status-program-wrap"><b data-i18n="status.program">البرنامج</b><span id="status-program">—</span></span>
+    <span class="item hide-sm" id="status-battery-wrap" hidden><b data-i18n="status.battery">البطارية</b><span id="status-battery">—</span></span>
+    <span class="spacer"></span>
+    <span class="item hide-sm"><span id="status-training">0</span> <span data-i18n="status.trainingLines">سطر تدريب</span></span>
+    <span class="item mono" id="status-cursor">Ln 1, Col 1</span>
+    <span class="item mono" id="status-mode">—</span>
+  </footer>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<!-- ================= dialogs ================= -->
+<dialog class="modal" id="dlg-connect">
+  <form method="dialog" id="connect-form">
+    <div class="modal-head">
+      <svg style="width:20px;height:20px;color:var(--brand)"><use href="#i-bluetooth"/></svg>
+      <h2 data-i18n="connect.title">الاتصال بالروبوت</h2>
+      <span class="spacer"></span>
+      <button class="icon-btn" type="button" data-close style="width:30px;height:30px;color:var(--muted)">
+        <svg style="width:15px;height:15px"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <label for="connect-target" data-i18n="connect.targetLabel">اسم الروبوت أو عنوان BLE</label>
+        <input class="input" id="connect-target" autocomplete="off" spellcheck="false"
+               placeholder="SPIKE Prime Hub" dir="ltr">
+      </div>
+      <div class="field">
+        <label data-i18n="connect.nearby">الأجهزة القريبة</label>
+        <div class="scan-list" id="scan-list">
+          <div class="scan-empty" data-i18n="connect.scanHint">اضغط «بحث» للعثور على الأجهزة القريبة</div>
+        </div>
+      </div>
+      <div class="hint-box">
+        <svg><use href="#i-info"/></svg>
+        <span data-i18n="connect.hint">شغّل الروبوت حتى يرمش زر الطاقة بالأزرق. اترك الحقل فارغاً للاتصال بأول روبوت متاح.</span>
+      </div>
+      <div id="connect-error" class="hint-box" style="display:none;background:rgba(207,49,54,.12)">
+        <svg style="color:var(--err)"><use href="#i-alert"/></svg>
+        <span id="connect-error-text"></span>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" type="button" id="btn-scan">
+        <svg><use href="#i-search"/></svg><span data-i18n="connect.scan">بحث</span>
+      </button>
+      <button class="btn btn-ghost" type="button" id="btn-disconnect" hidden>
+        <svg><use href="#i-x"/></svg><span data-i18n="connect.disconnect">قطع الاتصال</span>
+      </button>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" data-close data-i18n="action.cancel">إلغاء</button>
+      <button class="btn btn-primary" type="submit" id="btn-connect">
+        <svg><use href="#i-bluetooth"/></svg><span data-i18n="connect.connect">اتصال</span>
+      </button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-settings">
+  <form method="dialog" id="settings-form">
+    <div class="modal-head">
+      <svg style="width:20px;height:20px;color:var(--brand)"><use href="#i-settings"/></svg>
+      <h2 data-i18n="settings.title">الإعدادات</h2>
+      <span class="spacer"></span>
+      <button class="icon-btn" type="button" data-close style="width:30px;height:30px;color:var(--muted)">
+        <svg style="width:15px;height:15px"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div class="field-row">
+        <div class="field">
+          <label for="set-lang" data-i18n="settings.language">اللغة</label>
+          <select class="input" id="set-lang">
+            <option value="ar">العربية</option>
+            <option value="en">English</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="set-theme" data-i18n="settings.theme">المظهر</label>
+          <select class="input" id="set-theme">
+            <option value="light" data-i18n="settings.themeLight">فاتح</option>
+            <option value="dark" data-i18n="settings.themeDark">داكن</option>
+          </select>
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="set-font" data-i18n="settings.fontSize">حجم خط المحرر</label>
+          <input class="input" id="set-font" type="number" min="10" max="28" step="1">
+        </div>
+        <div class="field">
+          <label for="set-retries" data-i18n="settings.retries">محاولات الاتصال</label>
+          <input class="input" id="set-retries" type="number" min="1" max="10">
+        </div>
+        <div class="field">
+          <label for="set-timeout" data-i18n="settings.scanTimeout">مهلة البحث (ثانية)</label>
+          <input class="input" id="set-timeout" type="number" min="1" max="120">
+        </div>
+      </div>
+      <label class="check"><input type="checkbox" id="set-autoconnect"><span data-i18n="settings.autoconnect">محاولة الاتصال تلقائياً عند فتح التطبيق</span></label>
+      <label class="check"><input type="checkbox" id="set-timestamps"><span data-i18n="settings.timestamps">إظهار الطوابع الزمنية في المخرجات</span></label>
+      <label class="check"><input type="checkbox" id="set-autoscroll"><span data-i18n="settings.autoscroll">تمرير المخرجات تلقائياً</span></label>
+
+      <h4 style="margin:18px 0 6px;font-size:11px;letter-spacing:.8px;text-transform:uppercase;color:var(--muted-2)" data-i18n="settings.paths">المسارات</h4>
+      <div class="field">
+        <label data-i18n="settings.workspace">مجلد البرامج</label>
+        <input class="input" id="set-workspace" readonly dir="ltr">
+      </div>
+      <div class="field">
+        <label data-i18n="settings.logs">مجلد السجلات</label>
+        <input class="input" id="set-logs" readonly dir="ltr">
+      </div>
+      <div class="metric-row"><span data-i18n="settings.version">إصدار التطبيق</span><b id="set-version">—</b></div>
+      <div class="metric-row"><span data-i18n="settings.mode">وضع الاتصال</span><b id="set-mode">—</b></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" type="button" id="btn-reset-settings" data-i18n="settings.reset">استعادة الافتراضي</button>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" data-close data-i18n="action.cancel">إلغاء</button>
+      <button class="btn btn-primary" type="submit" data-i18n="action.save">حفظ</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-race">
+  <form method="dialog">
+    <div class="modal-head">
+      <svg style="width:20px;height:20px;color:var(--brand)"><use href="#i-race"/></svg>
+      <h2 data-i18n="race.title">برنامج السباق</h2>
+      <span class="spacer"></span>
+      <button class="icon-btn" type="button" data-close style="width:30px;height:30px;color:var(--muted)">
+        <svg style="width:15px;height:15px"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <div id="race-empty" class="empty-note" data-i18n="race.empty">لا توجد بيانات تدريب بعد. سجّل التدريب من الروبوت ثم اضغط «توليد».</div>
+      <textarea class="code-preview" id="race-code" spellcheck="false" hidden></textarea>
+      <div id="race-stats" class="hint-box" style="display:none">
+        <svg><use href="#i-info"/></svg><span id="race-stats-text"></span>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" type="button" id="btn-race-generate">
+        <svg><use href="#i-refresh"/></svg><span data-i18n="race.generate">توليد</span>
+      </button>
+      <span class="spacer"></span>
+      <button class="btn btn-ghost" type="button" id="btn-race-save" data-i18n="race.save" disabled>حفظ في مجلد البرامج</button>
+      <button class="btn btn-primary" type="button" id="btn-race-open" data-i18n="race.open" disabled>فتح في المحرر</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-help">
+  <form method="dialog">
+    <div class="modal-head">
+      <svg style="width:20px;height:20px;color:var(--brand)"><use href="#i-help"/></svg>
+      <h2 data-i18n="help.title">المساعدة والاختصارات</h2>
+      <span class="spacer"></span>
+      <button class="icon-btn" type="button" data-close style="width:30px;height:30px;color:var(--muted)">
+        <svg style="width:15px;height:15px"><use href="#i-x"/></svg>
+      </button>
+    </div>
+    <div class="modal-body">
+      <p style="margin-top:0;line-height:1.7;font-size:13px;color:var(--muted)" data-i18n="help.intro">
+        اكتب برنامج Pybricks، ثم اضغط «تنزيل وتشغيل» لرفعه إلى الروبوت. تظهر مخرجات الروبوت في لوحة المخرجات،
+        وتُحفظ تلقائياً في مجلد السجلات.
+      </p>
+      <table class="shortcut-table" id="shortcut-table"></table>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-primary" type="submit" data-i18n="action.close">إغلاق</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-confirm" style="width:min(440px,calc(100vw - 32px))">
+  <form method="dialog">
+    <div class="modal-head">
+      <svg style="width:20px;height:20px;color:var(--warn)"><use href="#i-alert"/></svg>
+      <h2 id="confirm-title">تأكيد</h2>
+    </div>
+    <div class="modal-body"><p id="confirm-text" style="margin:0;line-height:1.7"></p></div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" value="cancel" data-i18n="action.cancel">إلغاء</button>
+      <button class="btn btn-primary" value="ok" id="confirm-ok" data-i18n="action.confirm">تأكيد</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="modal" id="dlg-prompt" style="width:min(440px,calc(100vw - 32px))">
+  <form method="dialog" id="prompt-form">
+    <div class="modal-head">
+      <svg style="width:20px;height:20px;color:var(--brand)"><use href="#i-file"/></svg>
+      <h2 id="prompt-title">اسم الملف</h2>
+    </div>
+    <div class="modal-body">
+      <div class="field" style="margin:0">
+        <label for="prompt-input" id="prompt-label">اسم الملف</label>
+        <input class="input" id="prompt-input" dir="ltr" autocomplete="off" spellcheck="false" required>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn btn-ghost" value="cancel" data-i18n="action.cancel">إلغاء</button>
+      <button class="btn btn-primary" value="ok" id="prompt-ok" data-i18n="action.save">حفظ</button>
+    </div>
+  </form>
+</dialog>
+
+<input type="file" id="file-input" accept=".py,.txt" hidden>
+
+<script src="/vendor/codemirror/codemirror.js"></script>
+<script src="/vendor/codemirror/mode/python/python.js"></script>
+<script src="/vendor/codemirror/addon/edit/closebrackets.js"></script>
+<script src="/vendor/codemirror/addon/edit/matchbrackets.js"></script>
+<script src="/vendor/codemirror/addon/hint/show-hint.js"></script>
+<script src="/vendor/codemirror/addon/search/searchcursor.js"></script>
+<script src="/vendor/codemirror/addon/search/search.js"></script>
+<script src="/vendor/codemirror/addon/search/jump-to-line.js"></script>
+<script src="/vendor/codemirror/addon/dialog/dialog.js"></script>
+<script src="/vendor/codemirror/addon/selection/active-line.js"></script>
+<script src="/vendor/codemirror/addon/fold/foldcode.js"></script>
+<script src="/vendor/codemirror/addon/fold/foldgutter.js"></script>
+<script src="/vendor/codemirror/addon/fold/brace-fold.js"></script>
+<script src="/vendor/codemirror/addon/fold/indent-fold.js"></script>
+<script src="/vendor/codemirror/addon/fold/comment-fold.js"></script>
+<script src="/vendor/codemirror/addon/comment/comment.js"></script>
+<script src="/vendor/codemirror/addon/lint/lint.js"></script>
+<script src="/js/i18n.js"></script>
+<script src="/js/editor.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

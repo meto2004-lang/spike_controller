@@ -19,7 +19,11 @@ jobs:
       - name: Verify transport imports without connecting hardware
         run: python -c "from pybricksdev.connections.pybricks import PybricksHubBLE, PybricksHubUSB; import serial, libusb_package"
       - name: Compile application
-        run: python -m py_compile spike_core.py spike_transfer.py spike_documents.py spike_icons.py spike_controller.py
+        run: python -m py_compile spike_core.py spike_transfer.py spike_documents.py spike_icons.py spike_controller.py spike_paths.py spike_templates.py spike_race.py spike_workspace.py spike_hub.py spike_server.py
+      - name: Check browser scripts
+        run: node --check web/js/i18n.js && node --check web/js/editor.js && node --check web/js/app.js
+      - name: Browser app smoke test (jsdom)
+        run: npm install --no-save jsdom && node tools/ui_smoke.js
       - name: Headless regression tests (no robot required)
         run: python -W error::RuntimeWarning reports/verify_findings.py
       - name: Real Tk document tabs/layout tests (virtual display)
