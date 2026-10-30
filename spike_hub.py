@@ -19,8 +19,11 @@ from __future__ import annotations
 import ast
 import asyncio
 import concurrent.futures
+import importlib
 import os
+import platform
 import re
+import sys
 import threading
 import time
 import traceback
@@ -82,23 +85,58 @@ class HubController:
         self._ready = threading.Event()
         self._closing = False
 
+        self._force_simulation = bool(force_simulation)
+        self._import_error: str | None = None
         self._pybricks = None
         if not force_simulation:
-            self._pybricks = self._load_pybricks()
+            available, error = self._probe_pybricks()
+            self._pybricks = True if available else None
+            self._import_error = error
         if self._pybricks is None:
             self._state["mode"] = "simulation"
 
     # -- infrastructure -------------------------------------------------
     @staticmethod
-    def _load_pybricks():
+    def _load_pybricks() -> bool:
+        available, _error = HubController._probe_pybricks()
+        return available
+
+    @staticmethod
+    def _probe_pybricks() -> tuple[bool, str | None]:
+        """Import the BLE stack once and remember why it failed, if it did."""
         try:
             from pybricksdev.ble import find_device  # noqa: F401
             from pybricksdev.connections.pybricks import (  # noqa: F401
                 PybricksHubBLE, PybricksHubUSB,
             )
-            return True
+            return True, None
+        except Exception as exc:
+            return False, f"{type(exc).__name__}: {exc}"
+
+    @staticmethod
+    def _module_version(name: str) -> str | None:
+        try:
+            module = importlib.import_module(name)
         except Exception:
-            return False
+            return None
+        return str(getattr(module, "__version__", None) or "unknown")
+
+    def diagnostics(self) -> dict:
+        """Why Bluetooth is (or is not) available, for the connect dialog."""
+        reason = None
+        if self.simulation:
+            reason = "simulate_flag" if self._force_simulation else "missing_pybricksdev"
+        return {
+            "simulation": self.simulation,
+            "forced_simulation": self._force_simulation,
+            "reason": reason,
+            "reason_detail": self._import_error,
+            "pybricksdev": self._module_version("pybricksdev"),
+            "bleak": self._module_version("bleak"),
+            "serial": self._module_version("serial"),
+            "python": platform.python_version(),
+            "platform": sys.platform,
+        }
 
     @property
     def simulation(self) -> bool:
@@ -286,7 +324,7 @@ class HubController:
             for index, name in enumerate(names):
                 await asyncio.sleep(0.25)
                 hub = {"name": name, "address": f"SIM-{index + 1:02d}",
-                       "rssi": -42 - index * 9}
+                       "rssi": -42 - index * 9, "simulated": True}
                 found.append(hub)
                 self._publish({"t": "scan", "hubs": [hub], "done": False})
             self._publish({"t": "scan", "hubs": found, "done": True})
@@ -299,16 +337,24 @@ class HubController:
             from bleak import BleakScanner
             discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
         except Exception as exc:
-            raise HubError(f"Bluetooth scan failed: {exc}") from exc
+            self.progress("idle", percent=0)
+            self._publish({"t": "scan", "hubs": [], "done": True, "failed": True})
+            raise HubError(f"Bluetooth scan failed: {type(exc).__name__}: {exc}") from exc
         for device, adv in discovered.values():
             name = device.name or adv.local_name or "(unnamed)"
             hub = {"name": name, "address": device.address,
-                   "rssi": getattr(adv, "rssi", None)}
+                   "rssi": getattr(adv, "rssi", None), "simulated": False}
             found.append(hub)
             self._publish({"t": "scan", "hubs": [hub], "done": False})
-        self._publish({"t": "scan", "hubs": found, "done": True})
-        self.log("info", f"Found {len(found)} Bluetooth device(s)", key="log.scan_found",
-                 params={"count": len(found)})
+        self._publish({"t": "scan", "hubs": found, "done": True, "empty": not found})
+        if found:
+            self.log("info", f"Found {len(found)} Bluetooth device(s)", key="log.scan_found",
+                     params={"count": len(found)})
+        else:
+            # An empty scan is the most common "Bluetooth does not work" report:
+            # say what to check instead of leaving a silent, blank list.
+            self.log("warn", "No Bluetooth device was found", key="log.no_hub_found")
+            self.toast("warn", "No hub found nearby", key="toast.no_hub_found")
         self.progress("idle", percent=0)
 
     async def _op_connect(self, target: str | None, retries: int,
@@ -332,6 +378,7 @@ class HubController:
             return
 
         retries = max(1, min(int(retries or 1), 10))
+        last_error = ""
         for attempt in range(1, retries + 1):
             self.log("info", f"Attempt {attempt}/{retries} — scanning for a hub…",
                      key="log.searching", params={"attempt": attempt, "retries": retries})
@@ -342,7 +389,8 @@ class HubController:
                 await transport.disconnect()
                 raise
             except Exception as exc:
-                self.log("err", f"Connection failed: {type(exc).__name__}: {exc}",
+                last_error = f"{type(exc).__name__}: {exc}"
+                self.log("err", f"Connection failed: {last_error}",
                          key="log.connect_failed", params={"error": str(exc)})
                 await transport.disconnect()
                 continue
@@ -356,7 +404,9 @@ class HubController:
             self.toast("success", transport.label, key="toast.connected")
             await self._emit_welcome()
             return
-        raise HubError(f"no hub answered after {retries} attempts")
+        raise HubError(
+            f"no hub answered after {retries} attempts"
+            + (f" (last error: {last_error})" if last_error else ""))
 
     async def _emit_welcome(self) -> None:
         if self.simulation:

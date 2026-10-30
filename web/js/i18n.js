@@ -285,7 +285,23 @@
       "blocks.converted": "تم إنشاء ملف بايثون من الكتل",
       "blocks.new": "برنامج بالكتل",
       "blocks.fileLabel": "اسم الملف (ينتهي بـ .blocks)",
-      "blocks.invalidFile": "ملف الكتل غير صالح"
+      "blocks.invalidFile": "ملف الكتل غير صالح",
+
+      "connect.simulated": "محاكاة",
+      "connect.noHubHint": "لم يُعثر على أي روبوت. تأكد من: تشغيل الروبوت ورمش زر الطاقة بالأزرق، وأنه غير متصل بتطبيق آخر، وأن البلوتوث مفعّل على هذا الجهاز، ثم أعد المحاولة.",
+      "connect.status.hostedTitle": "أنت تستخدم نسخة معروضة عبر الشبكة",
+      "connect.status.hostedText": "البلوتوث يعمل فقط عندما يكون الخادم على جهازك نفسه (التبويب المفتوح من {host} لا يصل إلى مستقبل البلوتوث لديك). شغّل التطبيق محلياً ثم افتح http://127.0.0.1:8000 — وبعد تثبيت المتطلبات لن تحتاج وضع المحاكاة.",
+      "connect.status.missingTitle": "مكتبة pybricksdev غير مثبّتة",
+      "connect.status.missingText": "الخادم يعمل الآن بوضع المحاكاة لأن pybricksdev غير موجود في بايثون هذا الجهاز. ثبّت المتطلبات وأعد تشغيل الخادم للاتصال بالروبوت بالبلوتوث.",
+      "connect.status.simTitle": "وضع المحاكاة — لا يوجد بلوتوث",
+      "connect.status.simText": "الروبوت المتصل الآن محاكى بالكامل (لا يوجد اتصال بلوتوث حقيقي). لإيقاف المحاكاة، أعد تشغيل الخادم بالأمر أدناه بدون --simulate بعد تثبيت المتطلبات.",
+      "connect.status.readyTitle": "البلوتوث جاهز",
+      "connect.status.readyText": "pybricksdev {pybricksdev} · bleak {bleak} — شغّل الروبوت واقترب منه ثم اضغط «بحث».",
+      "errors.noHub": "لم يستجب أي روبوت بعد كل المحاولات. تأكد من تشغيل الروبوت، وقربه من الجهاز، وأنه غير متصل بتطبيق آخر، ثم أعد المحاولة.",
+      "errors.bluetoothFailed": "فشل البحث بالبلوتوث. تأكد من تفعيل البلوتوث ومن أذونات التطبيق، ثم أعد المحاولة.",
+      "errors.missingPybricks": "pybricksdev غير مثبّت في بيئة بايثون هذه، لذا لا يمكن استخدام البلوتوث. شغّل: python -m pip install -r requirements.txt ثم أعد تشغيل الخادم.",
+      "toast.no_hub_found": "لم يُعثر على أي روبوت قريب — تأكد من تشغيله ومن تفعيل البلوتوث",
+      "log.no_hub_found": "لم يُعثر على أي جهاز بلوتوث قريب"
     },
 
     en: {
@@ -569,7 +585,23 @@
       "blocks.converted": "Python file created from the blocks",
       "blocks.new": "Block program",
       "blocks.fileLabel": "File name (ends with .blocks)",
-      "blocks.invalidFile": "This block file is not valid"
+      "blocks.invalidFile": "This block file is not valid",
+
+      "connect.simulated": "simulated",
+      "connect.noHubHint": "No hub was found. Check that the hub is switched on (blinking blue power button), not connected to another app, and that Bluetooth is enabled on this computer, then try again.",
+      "connect.status.hostedTitle": "You are using a remotely hosted copy",
+      "connect.status.hostedText": "Bluetooth only works when the server runs on your own computer: this tab was served by {host}, which cannot reach your Bluetooth radio. Run the app locally and open http://127.0.0.1:8000 instead.",
+      "connect.status.missingTitle": "pybricksdev is not installed",
+      "connect.status.missingText": "The server fell back to simulation because pybricksdev is missing from this Python. Install the requirements and restart the server to use real Bluetooth.",
+      "connect.status.simTitle": "Simulation mode — no Bluetooth",
+      "connect.status.simText": "The connected hub is simulated; no Bluetooth link is used. To use a real robot, install the requirements and restart the server without --simulate.",
+      "connect.status.readyTitle": "Bluetooth is ready",
+      "connect.status.readyText": "pybricksdev {pybricksdev} · bleak {bleak} — switch the hub on, keep it close, then press Scan.",
+      "errors.noHub": "No hub answered after every attempt. Check that the hub is on, close to this computer, and not connected to another app, then try again.",
+      "errors.bluetoothFailed": "The Bluetooth scan failed. Make sure Bluetooth is enabled and the app has the required permissions, then try again.",
+      "errors.missingPybricks": "pybricksdev is not installed in this Python, so Bluetooth is unavailable. Run: python -m pip install -r requirements.txt and restart the server.",
+      "toast.no_hub_found": "No hub found nearby — check that it is switched on and Bluetooth is enabled",
+      "log.no_hub_found": "No Bluetooth device was found nearby"
     }
   };
 

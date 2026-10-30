@@ -1044,6 +1044,63 @@ textarea.input { height: auto; padding: 9px 11px; font-family: var(--mono); font
 .scan-row .rssi { font-size: 11px; color: var(--muted); font-family: var(--mono); }
 .scan-row.selected { background: var(--brand-soft); }
 
+.scan-badge {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--panel-3);
+  border: 1px solid var(--border-strong);
+  color: var(--muted);
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+/* why Bluetooth is (or is not) available, shown on top of the connect dialog */
+.connect-status {
+  display: flex;
+  gap: 9px;
+  padding: 10px 11px;
+  margin-bottom: 14px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--panel-3);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.connect-status[hidden] { display: none !important; }
+.connect-status-icon { width: 17px; height: 17px; flex: none; margin-top: 2px; color: var(--muted); }
+.connect-status-body { min-width: 0; }
+.connect-status-body strong { display: block; font-size: 12.5px; margin-bottom: 2px; }
+.connect-status-body p { margin: 0; color: var(--muted); }
+.connect-status-body code {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text);
+  direction: ltr;
+  unicode-bidi: embed;
+}
+.connect-status-body code[hidden] { display: none !important; }
+
+.connect-status[data-tone="ok"] { background: rgba(31, 157, 87, 0.1); border-color: rgba(31, 157, 87, 0.35); }
+.connect-status[data-tone="ok"] .connect-status-icon { color: #1f9d57; }
+.connect-status[data-tone="warn"] { background: rgba(224, 160, 0, 0.12); border-color: rgba(224, 160, 0, 0.4); }
+.connect-status[data-tone="warn"] .connect-status-icon { color: #b57b00; }
+.connect-status[data-tone="err"] { background: rgba(207, 49, 54, 0.12); border-color: rgba(207, 49, 54, 0.38); }
+.connect-status[data-tone="err"] .connect-status-icon { color: var(--err); }
+
+[data-theme="dark"] .connect-status[data-tone="ok"] { background: rgba(31, 157, 87, 0.18); }
+[data-theme="dark"] .connect-status[data-tone="warn"] { background: rgba(224, 160, 0, 0.18); }
+[data-theme="dark"] .connect-status[data-tone="err"] { background: rgba(207, 49, 54, 0.2); }
+
+
 .scan-empty {
   display: grid;
   place-items: center;

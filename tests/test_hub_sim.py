@@ -1,6 +1,9 @@
 """Headless tests for the browser app's hub controller (simulation transport)."""
+import sys
 import time
+import types
 import unittest
+from unittest import mock
 
 from spike_hub import HubBusy, HubController, HubError, _scripted_steps
 from spike_race import TrainingSession
@@ -114,6 +117,91 @@ class ScriptedStepTests(unittest.TestCase):
     def test_non_literal_arguments_are_masked(self):
         steps = _scripted_steps("robot.straight(distance)\n")
         self.assertIn("…", steps[0][1])
+
+
+class TransportDiagnosticsTests(unittest.TestCase):
+    """The connect dialog needs a machine-readable reason for "no Bluetooth"."""
+
+    def make(self, events, **kwargs):
+        hub = HubController(events.append, TrainingSession(), **kwargs)
+        self.addCleanup(hub.close)
+        return hub
+
+    def test_reason_is_simulate_flag_when_asked(self):
+        hub = self.make([], force_simulation=True)
+        info = hub.diagnostics()
+        self.assertTrue(info["simulation"])
+        self.assertTrue(info["forced_simulation"])
+        self.assertEqual(info["reason"], "simulate_flag")
+        self.assertIsNone(info["reason_detail"])
+        for key in ("pybricksdev", "bleak", "serial", "python", "platform"):
+            self.assertIn(key, info)
+
+    def test_missing_pybricksdev_is_reported_with_the_import_error(self):
+        with mock.patch.object(HubController, "_probe_pybricks",
+                               staticmethod(lambda: (False, "ModuleNotFoundError: no pybricksdev"))):
+            hub = self.make([])
+        info = hub.diagnostics()
+        self.assertTrue(info["simulation"])
+        self.assertFalse(info["forced_simulation"])
+        self.assertEqual(info["reason"], "missing_pybricksdev")
+        self.assertIn("pybricksdev", info["reason_detail"])
+
+    def test_hardware_mode_has_no_reason(self):
+        hub = self.make([], force_simulation=True)
+        hub._pybricks = True  # pretend the BLE stack imported correctly
+        info = hub.diagnostics()
+        self.assertFalse(info["simulation"])
+        self.assertIsNone(info["reason"])
+
+
+class _EmptyScanner:
+    @staticmethod
+    async def discover(timeout=None, return_adv=True):
+        return {}
+
+
+class EmptyScanTests(unittest.TestCase):
+    """An empty Bluetooth scan must say what to check, not stay silent."""
+
+    def setUp(self):
+        self.events = []
+        self.hub = HubController(self.events.append, TrainingSession(),
+                                 force_simulation=True)
+        self.hub._pybricks = True
+        self.hub.start()
+
+    def tearDown(self):
+        self.hub.close()
+
+    def test_scan_without_devices_warns_and_finishes(self):
+        fake_bleak = types.ModuleType("bleak")
+        fake_bleak.BleakScanner = _EmptyScanner
+        with mock.patch.dict(sys.modules, {"bleak": fake_bleak}):
+            self.hub.scan(timeout=0.05)
+            self.assertTrue(wait_until(lambda: not self.hub.state()["busy"]),
+                            self.events)
+        scans = [event for event in self.events if event["t"] == "scan" and event.get("done")]
+        self.assertTrue(scans, self.events)
+        self.assertEqual(scans[-1]["hubs"], [])
+        self.assertTrue(scans[-1]["empty"])
+        self.assertTrue(any(event["t"] == "toast" and event.get("key") == "toast.no_hub_found"
+                            for event in self.events), self.events)
+        self.assertTrue(any(event["t"] == "console" and event.get("key") == "log.no_hub_found"
+                            for event in self.events), self.events)
+
+    def test_simulated_hubs_are_flagged(self):
+        self.hub._pybricks = None
+        self.hub.connect()
+        self.assertTrue(wait_until(lambda: self.hub.state()["connected"]), self.events)
+        self.hub.scan()
+        self.assertTrue(wait_until(
+            lambda: any(event["t"] == "scan" and event.get("done") for event in self.events)),
+            self.events)
+        hubs = [hub for event in self.events if event["t"] == "scan"
+                for hub in event.get("hubs", [])]
+        self.assertTrue(hubs, self.events)
+        self.assertTrue(all(hub.get("simulated") for hub in hubs), hubs)
 
 
 if __name__ == "__main__":

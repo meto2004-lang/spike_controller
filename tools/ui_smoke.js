@@ -50,6 +50,9 @@ const bootstrap = {
   version: "2.1.0",
   simulation: true,
   pybricksdev: false,
+  transport: { simulation: true, forced_simulation: true, reason: "simulate_flag",
+               reason_detail: null, pybricksdev: null, bleak: null,
+               python: "3.11.2", platform: "linux" },
   settings: { lang: "ar", theme: "light", font_size: 14, retries: 6, scan_timeout: 20,
               autoconnect: false, hub_name: "", timestamps: true, auto_scroll: true, last_file: null },
   state: { connected: true, busy: false, running: false, label: "SPIKE Prime (simulation)",
@@ -211,9 +214,17 @@ const assert = (condition, message) => {
   window.document.querySelector("#hub-chip").click();
   await wait(20);
   assert(window.document.querySelector("#dlg-connect").open === true, "connect dialog");
-  window.__emit({ t: "scan", done: true, hubs: [{ name: "Hub A", address: "AA:BB", rssi: -50 }] });
+  assert(window.document.querySelector("#connect-status").dataset.tone === "warn",
+         "connect dialog explains why Bluetooth is off");
+  assert(window.document.querySelector("#connect-status-title").textContent.trim().length > 0,
+         "connect dialog status has a title");
+  assert(window.document.querySelector("#connect-status-text").textContent.includes("محاكاة") ||
+         window.document.querySelector("#connect-status-text").textContent.toLowerCase().includes("simulat"),
+         "connect dialog explains simulation mode");
+  window.__emit({ t: "scan", done: true, hubs: [{ name: "Hub A", address: "AA:BB", rssi: -50, simulated: true }] });
   await wait(20);
   assert(window.document.querySelectorAll(".scan-row").length === 1, "scan result rendered");
+  assert(!!window.document.querySelector(".scan-badge"), "simulated hub is labelled");
 
   // race generation
   window.document.querySelector("#dlg-connect").close();

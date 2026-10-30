@@ -71,6 +71,15 @@ class WebServerTests(unittest.TestCase):
         self.assertTrue(data["examples"])
         self.assertEqual(data["workspace"]["dir"], os.path.join(self.tmp.name, "programs"))
 
+    def test_bootstrap_explains_the_bluetooth_transport(self):
+        status, data = request(self.port, "GET", "/api/bootstrap")
+        self.assertEqual(status, 200)
+        details = data["transport"]
+        self.assertTrue(details["simulation"])
+        self.assertIn(details["reason"], ("simulate_flag", "missing_pybricksdev"))
+        self.assertIn("pybricksdev", details)
+        self.assertIn("bleak", details)
+
     def test_index_is_served(self):
         status, body = request(self.port, "GET", "/")
         self.assertEqual(status, 200)

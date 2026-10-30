@@ -262,6 +262,14 @@
       </button>
     </div>
     <div class="modal-body">
+      <div class="connect-status" id="connect-status" data-tone="info">
+        <svg class="connect-status-icon"><use href="#i-info"/></svg>
+        <div class="connect-status-body">
+          <strong id="connect-status-title"></strong>
+          <p id="connect-status-text"></p>
+          <code id="connect-status-command" dir="ltr" hidden></code>
+        </div>
+      </div>
       <div class="field">
         <label for="connect-target" data-i18n="connect.targetLabel">اسم الروبوت أو عنوان BLE</label>
         <input class="input" id="connect-target" autocomplete="off" spellcheck="false"

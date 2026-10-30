@@ -217,6 +217,7 @@ class WebApp:
             "version": VERSION,
             "simulation": self.hub.simulation,
             "pybricksdev": not self.hub.simulation,
+            "transport": self.hub.diagnostics(),
             "settings": self.settings,
             "state": state,
             "workspace": {"dir": self.workspace.root, "files": self.workspace.list()},
@@ -589,9 +590,19 @@ def main(argv=None) -> int:
     host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
     url = f"http://{host}:{server.server_address[1]}/"
     mode = "SIMULATION" if server.app.hub.simulation else "HARDWARE"
-    print(f"Hyena Control Web {VERSION} — {mode}")
-    print(f"Open {url}  (Ctrl+C to stop)")
-    print(f"Workspace: {server.app.workspace.root}")
+    print(f"Hyena Control Web {VERSION} — {mode}", flush=True)
+    if server.app.hub.simulation:
+        details = server.app.hub.diagnostics()
+        if details["reason"] == "simulate_flag":
+            print("Bluetooth is off because --simulate was given.", flush=True)
+            print("Restart without --simulate to talk to a real hub.", flush=True)
+        else:
+            print("Bluetooth is off because pybricksdev could not be imported:", flush=True)
+            print(f"  {details['reason_detail']}", flush=True)
+            print("Install it with:  python -m pip install -r requirements.txt", flush=True)
+            print("Then restart this server.", flush=True)
+    print(f"Open {url}  (Ctrl+C to stop)", flush=True)
+    print(f"Workspace: {server.app.workspace.root}", flush=True)
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     try:

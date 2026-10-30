@@ -110,7 +110,10 @@
       [/too large/i, "errors.tooLarge"],
       [/no training data/i, "race.noData"],
       [/incomplete session/i, "race.incomplete"],
-      [/no robot\./i, "race.noCommands"]
+      [/no robot\./i, "race.noCommands"],
+      [/no hub answered/i, "errors.noHub"],
+      [/bluetooth scan failed/i, "errors.bluetoothFailed"],
+      [/no module named '?pybricksdev|pybricksdev could not be imported/i, "errors.missingPybricks"]
     ];
     for (var i = 0; i < map.length; i += 1) {
       if (map[i][0].test(message)) return t(map[i][1]);
@@ -156,6 +159,7 @@
     renderDrawer();
     renderHub();
     if (state.blockView) state.blockView.setLanguage(lang);
+    renderConnectStatus();
     renderTraining();
     rerenderConsole();
     if (persist) saveSettings({ lang: lang });
@@ -724,10 +728,75 @@
   }
 
   // ------------------------------------------------------------------ connect
+  function transportInfo() {
+    return (state.boot && state.boot.transport) || {};
+  }
+
+  function isLoopbackPage() {
+    var host = ((window.location && window.location.hostname) || "").toLowerCase();
+    if (!host) return true;
+    if (host === "localhost" || host === "::1" || host === "[::1]") return true;
+    if (host === "0.0.0.0" || host === "127.0.0.1") return true;
+    return /^127\./.test(host);
+  }
+
+  function renderConnectStatus() {
+    var panel = $("#connect-status");
+    if (!panel) return;
+    var info = transportInfo();
+    var title = "";
+    var text = "";
+    var command = "";
+    var tone = "info";
+    var icon = "info";
+    if (!isLoopbackPage()) {
+      // The page is served from somewhere other than this machine (a hosted
+      // preview or a remote server): the browser cannot reach a local radio.
+      tone = "warn";
+      icon = "alert";
+      title = t("connect.status.hostedTitle");
+      text = t("connect.status.hostedText", { host: window.location.hostname || "?" });
+      command = "python -m pip install -r requirements.txt";
+    } else if (info.reason === "missing_pybricksdev") {
+      tone = "err";
+      icon = "alert";
+      title = t("connect.status.missingTitle");
+      text = t("connect.status.missingText");
+      command = "python -m pip install -r requirements.txt";
+    } else if (info.simulation) {
+      tone = "warn";
+      icon = "alert";
+      title = t("connect.status.simTitle");
+      text = t("connect.status.simText");
+      command = "python spike_server.py";
+    } else {
+      tone = "ok";
+      icon = "bluetooth";
+      title = t("connect.status.readyTitle");
+      text = t("connect.status.readyText", {
+        pybricksdev: info.pybricksdev || "—",
+        bleak: info.bleak || "—"
+      });
+    }
+    panel.dataset.tone = tone;
+    var use = panel.querySelector("use");
+    if (use) use.setAttribute("href", "#i-" + icon);
+    var titleNode = $("#connect-status-title");
+    var textNode = $("#connect-status-text");
+    var commandNode = $("#connect-status-command");
+    if (titleNode) titleNode.textContent = title;
+    if (textNode) textNode.textContent = text;
+    if (commandNode) {
+      commandNode.textContent = command;
+      commandNode.hidden = !command;
+    }
+  }
+
   function openConnect() {
     var dialog = $("#dlg-connect");
     $("#connect-target").value = state.settings.hub_name || "";
     $("#connect-error").style.display = "none";
+    renderConnectStatus();
     renderScanList();
     if (!dialog.open) dialog.showModal();
     setTimeout(function () { $("#connect-target").focus(); }, 30);
@@ -755,7 +824,8 @@
           el("b", { text: hub.name || "(unnamed)" }),
           el("span", { text: hub.address || "" })
         ]),
-        el("span", { class: "rssi", text: typeof hub.rssi === "number" ? hub.rssi + " dBm" : "" })
+        el("span", { class: "rssi", text: typeof hub.rssi === "number" ? hub.rssi + " dBm" : "" }),
+        hub.simulated ? el("span", { class: "scan-badge", text: t("connect.simulated") }) : null
       ]);
       var choose = function () {
         state.scanSelected = hub.address;
@@ -778,8 +848,17 @@
       if (!state.scan.length) {
         $("#scan-list").innerHTML = "";
         $("#scan-list").appendChild(el("div", { class: "scan-empty", text: t("connect.noneFound") }));
+        if (ev.failed) {
+          showConnectError(t("errors.bluetoothFailed"));
+        } else if (!state.boot || !state.boot.simulation) {
+          showConnectError(t("connect.noHubHint"));
+        } else {
+          showConnectError(t("connect.status.simText"));
+        }
+        renderScanList();
         return;
       }
+      $("#connect-error").style.display = "none";
       renderScanList();
       toast("info", t("connect.found", { count: state.scan.length }));
     } else {
@@ -1561,6 +1640,7 @@
     applyTheme(state.settings.theme || "light");
     applyFontSize(state.settings.font_size || 14);
     $("#btn-lang").textContent = (state.settings.lang === "ar") ? "EN" : "ع";
+    renderConnectStatus();
 
     // editor first, so language-driven re-renders have something to talk to
     state.editor = new window.HyenaEditor.EditorManager({
