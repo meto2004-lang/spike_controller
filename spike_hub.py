@@ -362,6 +362,8 @@ class HubController:
         if self.simulation:
             self.log("info", "Simulation mode — no Bluetooth is used",
                      key="log.sim_env")
+            self.log("info", "The simulated hub is ready: press Download and run (F5)",
+                     key="log.sim_ready")
         else:
             self.log("info", await self._environment())
         self._publish({"t": "training", **self.training.snapshot()})

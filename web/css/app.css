@@ -188,7 +188,8 @@ button { cursor: pointer; }
   border: 1px solid rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.06);
   color: var(--topbar-text);
-  max-width: 320px;
+  flex: 0 1 320px;
+  min-width: 116px;
   transition: background 0.15s ease, border-color 0.15s ease;
 }
 
@@ -254,6 +255,11 @@ button { cursor: pointer; }
   border: 1px solid rgba(240, 181, 63, 0.35);
   white-space: nowrap;
 }
+
+.topbar .btn,
+.topbar .lang-btn,
+.topbar .icon-btn,
+.topbar .sim-badge { flex: none; }
 
 .btn {
   display: inline-flex;
@@ -1176,8 +1182,12 @@ textarea.input { height: auto; padding: 9px 11px; font-family: var(--mono); font
 }
 ::-webkit-scrollbar-thumb:hover { background-clip: content-box; background-color: var(--muted-2); }
 
-@media (max-width: 900px) {
+@media (max-width: 1150px) {
   .brand-name { display: none; }
+  .hub-chip { flex-basis: 240px; }
+}
+
+@media (max-width: 900px) {
   .hub-chip .hub-sub { display: none; }
   .drawer {
     position: absolute;

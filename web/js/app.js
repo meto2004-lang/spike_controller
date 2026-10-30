@@ -1484,7 +1484,10 @@
     if (localStorage.getItem("hyena.consoleCollapsed") === "1") collapseConsole(true);
 
     connectEvents();
-    if (state.settings.autoconnect && !boot.state.connected) {
+    if (boot.simulation && !boot.state.connected) {
+      // The simulated hub is free and makes the demo usable right away.
+      api("/api/hub/connect", { target: null }).catch(function () { });
+    } else if (state.settings.autoconnect && !boot.state.connected) {
       api("/api/hub/connect", { target: state.settings.hub_name || null }).catch(function () { });
     }
     window.addEventListener("resize", function () { state.editor.refresh(); });
