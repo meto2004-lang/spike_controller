@@ -280,6 +280,15 @@ def trace_upload_writes(hub):
 
 def transfer_environment(hub) -> str:
     parts = [f"firmware={getattr(hub, 'fw_version', '?')}", f"platform={sys.platform}"]
+    if getattr(hub, "_app_is_official", False):
+        parts.append("firmware=official-lego")
+        for package in ("bleak", "pyserial"):
+            try:
+                installed = version(package)
+            except PackageNotFoundError:
+                installed = "unknown"
+            parts.append(f"{package}={installed}")
+        return " ".join(parts)
     for package in ("pybricksdev", "bleak"):
         try:
             installed = version(package)
