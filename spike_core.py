@@ -51,8 +51,17 @@ def validated_config(data, defaults: dict) -> dict:
     if isinstance(name, str) and len(name) <= 128 and all(ord(c) >= 32 for c in name):
         cfg["hub_name"] = name.strip()
     fw_mode = data.get("firmware_mode")
-    if fw_mode in ("auto", "Pybricks", "LEGO رسمي"):
-        cfg["firmware_mode"] = fw_mode
+    # قبول القيم الجديدة والقديمة (للتوافق مع إعدادات المستخدم القديمة).
+    _allowed = ("auto", "pybricks", "official-lego",
+                "Pybricks", "LEGO رسمي", "LEGO", "official")
+    if fw_mode in _allowed:
+        # تطبيع إلى المفتاح الداخلي الثابت.
+        if fw_mode in ("Pybricks",):
+            cfg["firmware_mode"] = "pybricks"
+        elif fw_mode in ("LEGO رسمي", "LEGO", "official"):
+            cfg["firmware_mode"] = "official-lego"
+        else:
+            cfg["firmware_mode"] = fw_mode
     recent = data.get("recent")
     if isinstance(recent, list):
         cfg["recent"] = list(dict.fromkeys(x for x in recent if isinstance(x, str) and x and "\0" not in x))[:6]

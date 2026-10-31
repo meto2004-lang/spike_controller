@@ -43,7 +43,7 @@ from spike_transfer import (TransferFailure, configure_ble_upload, needs_fresh_s
 from spike_official import (OfficialBLEHub, OfficialUSBCDC, BLEAK_OK as OFFICIAL_BLEAK_OK,
                             BLEAK_ERR as OFFICIAL_BLEAK_ERR, SERIAL_OK as OFFICIAL_SERIAL_OK,
                             SERIAL_ERR as OFFICIAL_SERIAL_ERR, is_official_firmware_usb,
-                            LEGO_HUB_SERVICE_UUID, find_official_device)
+                            LEGO_HUB_SERVICE_UUID, find_official_device, diagnostic_scan)
 
 # مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -345,7 +345,17 @@ class App:
 
         # أنشئ متغيرات الواجهة مُبكّراً حتى لو استُدعيت الأفعال من أي مسار
         # (مثل الاختصارات أو autoconnect) قبل أن يكتمل بناء شريط الأدوات.
-        self._fw_internal = self.cfg.get("firmware_mode", "auto")
+        # تعيين خريطة العرض والقيم الداخلية مبكراً (نسخة مكررة عما في _build_toolbar
+        # حتى تكون متاحة قبل بناء شريط الأدوات).
+        self._fw_display = {
+            "auto":            "تلقائي",
+            "pybricks":        "Pybricks",
+            "official-lego":   "LEGO رسمي",
+        }
+        self._FW_MODES = tuple(self._fw_display.keys())
+        self._fw_keys = list(self._fw_display.keys())
+        self._fw_internal = self._normalise_fw_mode(self.cfg.get("firmware_mode", "auto"))
+        self.cfg["firmware_mode"] = self._fw_internal
         self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
         self.firmware_var = tk.StringVar(value=self._fw_label(self._fw_internal))
         self._toolbar_images = {}
@@ -664,15 +674,18 @@ class App:
         for key, title, icon, command, shortcut in (
                 ("race", "توليد ملف سباق", "race", self.action_race_gen, "Ctrl+G"),
                 ("clear", "جلسة جديدة / مسح", "new", self.action_clear_console, "Ctrl+L"),
-                ("export", "تصدير السجل", "export", self.action_export_log, "")):
+                ("export", "تصدير السجل", "export", self.action_export_log, ""),
+                ("scan", "تشخيص البلوتوث", "bluetooth", self.action_ble_diagnostics, "")):
             self._add_toolbar_action(self.tools_menu, key, title, icon, command, shortcut)
         target = ttk.Frame(self.toolbar)
         target.grid(row=0, column=6, sticky="ew", padx=(8, 0))
         fw_frame = ttk.Frame(target)
         fw_frame.pack(side="right", padx=(6, 0))
         ttk.Label(fw_frame, text=to_visual("الفرموير:"), style="Header.TLabel").pack(side="right", padx=2)
-        self.fw_combo = ttk.Combobox(fw_frame, textvariable=self.firmware_var, width=14, state="readonly",
-                                     values=(to_visual("تلقائي"), "Pybricks", to_visual("LEGO رسمي")))
+        self.fw_combo = ttk.Combobox(
+            fw_frame, textvariable=self.firmware_var, width=14, state="readonly",
+            values=[self._fw_display[k] for k in self._fw_keys],
+        )
         self.fw_combo.pack(side="right")
         self.fw_combo.bind("<<ComboboxSelected>>", lambda e: self._save_firmware_mode())
         ttk.Label(target, text=to_visual("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
@@ -680,15 +693,31 @@ class App:
         self.target_entry.pack(side="left", fill="x", expand=True)
         self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_send, self.btn_stop)
 
-    @staticmethod
-    def _fw_label(mode: str) -> str:
-        return {"auto": "تلقائي", "Pybricks": "Pybricks", "LEGO رسمي": "LEGO رسمي"}.get(mode, "تلقائي")
+    def _normalise_fw_mode(self, mode) -> str:
+        """تطبيع قيمة الفرموير من إعدادات قديمة/جديدة إلى مفتاح داخلي ثابت."""
+        if mode in ("pybricks", "Pybricks"):
+            return "pybricks"
+        if mode in ("official-lego", "LEGO رسمي", "LEGO", "official"):
+            return "official-lego"
+        return "auto"
 
-    @staticmethod
-    def _fw_from_label(label: str) -> str:
-        table = {"تلقائي": "auto", "Pybricks": "Pybricks", "LEGO رسمي": "LEGO رسمي",
-                 "auto": "auto"}
-        return table.get(label, "auto")
+    def _fw_label(self, mode: str) -> str:
+        # آمن قبل بناء _fw_display في __init__ أيضاً.
+        table = getattr(self, "_fw_display", None) or {
+            "auto": "تلقائي", "pybricks": "Pybricks", "official-lego": "LEGO رسمي",
+        }
+        return table.get(self._normalise_fw_mode(mode), table["auto"])
+
+    def _fw_from_label(self, label: str) -> str:
+        # مطابقة مرنة: مفتاح، أو النص الظاهر (مع/بدون تشكيل عربي)، أو إعدادات قديمة.
+        norm = self._normalise_fw_mode(label)
+        if norm != "auto":
+            return norm
+        table = getattr(self, "_fw_display", {})
+        for key, visible in table.items():
+            if label == visible or label == to_visual(visible):
+                return key
+        return "auto"
 
     def _add_toolbar_action(self, menu, key, title, icon, command, shortcut):
         menu.add_command(label=to_visual(title), image=self._toolbar_images[icon][0], compound="left",
@@ -750,9 +779,11 @@ class App:
 
     def _save_firmware_mode(self):
         mode = self._fw_from_label(self.firmware_var.get())
-        if mode in ("auto", "Pybricks", "LEGO رسمي"):
+        if mode in self._FW_MODES:
             self.cfg["firmware_mode"] = mode
             self._fw_internal = mode
+            # حدّث النص الظاهر في الـ Combobox ليتطابق (مهم إن وُصلت قيمة مشكّلة)
+            self.firmware_var.set(self._fw_label(mode))
             self.console(f"تم تبديل وضع الفرموير إلى: {self._fw_label(mode)}", "info")
 
     def _build_menu(self) -> None:
@@ -1379,20 +1410,30 @@ class App:
         return self._worker_hub
 
     def _firmware_modes_wanted(self):
-        """Return ordered list of firmware backends to try: 'pybricks' and/or 'official'."""
-        mode = self.cfg.get("firmware_mode", "auto")
-        if mode == "Pybricks":
+        """Return ordered list of firmware backends to try: 'pybricks' and/or 'official-lego'."""
+        mode = self._normalise_fw_mode(self.cfg.get("firmware_mode", "auto"))
+        if mode == "pybricks":
             return ["pybricks"]
-        if mode == "LEGO رسمي":
-            return ["official"]
-        return ["pybricks", "official"]
+        if mode == "official-lego":
+            return ["official-lego"]
+        # الوضع التلقائي: جرّب Pybricks مرّة أو اثنتين ثم انتقل إلى الرسمي حتى لا نبتلع
+        # دقيقتين قبل الوصول للباك اند الصحيح.
+        return ["pybricks", "official-lego"]
+
+    def _retries_for_backend(self, backend: str) -> int:
+        """عدد المحاولات لكل باك اند. Pybricks في الوضع التلقائي يأخذ محاولتين فقط."""
+        total = int(self.cfg.get("retries", 6))
+        wanted = self._firmware_modes_wanted()
+        if len(wanted) > 1 and backend == "pybricks":
+            return min(2, total)
+        return total
 
     async def op_connect(self, target=None):
         wanted = self._firmware_modes_wanted()
         scan = int(self.cfg.get("scan_timeout", 20))
-        retries = int(self.cfg.get("retries", 6))
         last_err = None
         for backend in wanted:
+            retries = self._retries_for_backend(backend)
             for attempt in range(1, retries + 1):
                 label = "Pybricks" if backend == "pybricks" else "الفيرموير الرسمي (LEGO)"
                 self._say(f"[{label}] المحاولة {attempt}/{retries} — جاري البحث عن الروبوت...")
@@ -1401,10 +1442,18 @@ class App:
                         last_err = f"pybricksdev غير متوفر: {PB_ERR}"
                         break
                     try:
-                        dev = await find_device(target or None, timeout=scan // max(1, len(wanted)))
+                        # استخدم مهلة المسح الكاملة في أول محاولة، ونصفها في البقية لتسريع التبديل.
+                        t = scan if attempt == 1 else max(8, scan // 2)
+                        dev = await find_device(target or None, timeout=t)
                     except asyncio.TimeoutError:
-                        self._say("لم يُعثر على روبوت Pybricks — سأحاول الفيرموير الرسمي إن اخترت الوضع التلقائي",
-                                  "info" if "official" in wanted else "err")
+                        if "official-lego" in wanted and attempt == retries:
+                            self._say("لم يُعثر على روبوت Pybricks — سأحاول الفيرموير الرسمي...", "info")
+                        else:
+                            self._say(
+                                "لم يُعثر على روبوت Pybricks" +
+                                (" — سأحاول الفيرموير الرسمي..." if ("official-lego" in wanted and attempt == retries) else ""),
+                                "info" if "official-lego" in wanted else "err",
+                            )
                         continue
                     hub = PybricksHubBLE(dev)
                     try:
@@ -1434,19 +1483,40 @@ class App:
                         self._worker_hub = None
                         raise
                     return hub
-                else:  # official firmware via BLE (LWP3)
+                else:  # official-lego firmware via BLE (LWP3)
                     if not OFFICIAL_BLEAK_OK:
                         last_err = f"مكتبة bleak غير متوفرة للفيرموير الرسمي: {OFFICIAL_BLEAK_ERR}"
                         break
                     try:
-                        dev = await find_official_device(target or None, timeout=scan // max(1, len(wanted)))
+                        t = scan if attempt == 1 else max(10, scan // 2)
+                        self._say(f"[مسح] جاري فحص أجهزة البلوتوث لمدة {int(t)} ثانية...", "info")
+                        _seen = set()
+
+                        def _dbg(addr, entry):
+                            if addr in _seen:
+                                return
+                            _seen.add(addr)
+                            flags = []
+                            if entry.get("has_lego_md"):
+                                flags.append("LEGO manufacturer")
+                            nm = entry.get("name") or "(بلا اسم)"
+                            rssi = entry.get("rssi")
+                            rssi_txt = f" rssi={rssi}" if rssi is not None else ""
+                            self._say(f"[مسح] وجدت: {addr}  name='{nm}'{rssi_txt}  {', '.join(flags) if flags else ''}")
+
+                        dev = await find_official_device(
+                            target or None, timeout=t,
+                            name_hint=target or None,
+                            debug_cb=_dbg,
+                        )
                     except asyncio.TimeoutError:
-                        self._say("لم يُعثر على روبوت بالفيرموير الرسمي", "err")
+                        self._say("انتهت مهلة البحث عن روبوت الفيرموير الرسمي (بلوتوث)", "err")
                         continue
                     if dev is None:
-                        self._say("لم يُعثر على روبوت LEGO رسمي عبر البلوتوث", "info")
+                        self._say("لم يُعثر على روبوت LEGO رسمي عبر البلوتوث. "
+                                  "تأكد أنه مضاء، يرمش أزرق، وغير متصل بتطبيق آخر.", "info")
                         continue
-                    hub = OfficialBLEHub(target_name=target, scan_timeout=scan // max(1, len(wanted)))
+                    hub = OfficialBLEHub(target_name=getattr(dev, "name", target), scan_timeout=scan)
                     try:
                         await asyncio.wait_for(hub.connect(), timeout=60)
                     except asyncio.CancelledError:
@@ -1462,7 +1532,7 @@ class App:
                         continue
                     self._say(f"تم الاتصال بـ {hub._app_label} — الفرموير {hub.fw_version}", "ok")
                     self._say(
-                        "ملاحظة: الفيرموير الرسمي لا يدعم رفع بايثون عبر البلوتوث. "
+                        "ملاحظة: الفيرموير الرسمي عبر البلوتوث يتيح الاستقبال فقط؛ "
                         "لإرسال البرامج استخدم «اتصال USB» (منفذ REPL).", "info")
                     self._worker_hub = hub
                     try:
@@ -1524,7 +1594,7 @@ class App:
                         return hub
 
         # 2) Official-firmware USB CDC (MicroPython raw REPL) path.
-        if "official" in wanted:
+        if "official-lego" in wanted:
             port = self._find_hub_port()
             if port:
                 self._say(f"تم العثور على منفذ REPL الرسمي: {port}", "info")
@@ -2103,6 +2173,69 @@ class App:
             self.console(f"صُدّر السجل: {p}", "ok")
         except Exception as e:
             messagebox.showerror("خطأ", f"تعذر التصدير:\n{e}")
+
+    def action_ble_diagnostics(self):
+        """مسح خام لجميع أجهزة BLE القريبة وطباعة معلوماتها في الكونسول."""
+        if self.busy or self._closing:
+            self.console("أكمل العملية الحالية أولاً", "info")
+            return
+        if not OFFICIAL_BLEAK_OK and not PB_OK:
+            self.console(f"مكتبة البلوتوث غير متوفرة: {OFFICIAL_BLEAK_ERR or PB_ERR}", "err")
+            return
+        self.console("=== تشخيص البلوتوث: جاري المسح لمدة 8 ثوانٍ ===", "info")
+
+        async def _op():
+            return await diagnostic_scan(timeout=8.0)
+
+        def _done(fut):
+            try:
+                res = fut.result()
+            except Exception as exc:
+                self.queue.put(("console", f"فشل التشخيص: {exc}", "err"))
+                return
+            self.queue.put(("console", f"=== انتهى المسح: وُجد {len(res)} جهاز ===", "info"))
+            if not res:
+                self.queue.put(("console",
+                                "لم يُكتشف أي جهاز بلوتوث. تحقق من أن محوّل البلوتوث شغّال، "
+                                "ومن صلاحيات الوصول إليه، وأن البلوتوث في ويندوز غير محجوب "
+                                "لتطبيق آخر.",
+                                "err"))
+                return
+            lego_like = 0
+            for addr, name, has_lego, uuids, rssi in sorted(
+                    res, key=lambda x: (x[4] if x[4] is not None else -999), reverse=True):
+                tags = []
+                if has_lego:
+                    tags.append("LEGO manufacturer(0x0397)")
+                if any(u.lower().startswith("00001623") or "1623-" in u.lower() for u in uuids):
+                    tags.append("LEGO Hub service")
+                if any("6e400001" in u.lower() for u in uuids):
+                    tags.append("NUS")
+                nm = (name or "(بلا اسم)").lower()
+                if "spike" in nm or nm.startswith("hub-") or "lego" in nm or "inventor" in nm or "mpy" in nm:
+                    lego_like += 1
+                self.queue.put((
+                    "console",
+                    f"  {addr}  name='{name or '(بلا اسم)'}'  "
+                    f"rssi={rssi if rssi is not None else '?'}  "
+                    f"uuids={len(uuids)}  {' | '.join(tags) if tags else ''}",
+                    "ok" if tags else "out"))
+            self.queue.put(("console", f"منها {lego_like} جهة تبدو كأنها من LEGO.", "info"))
+
+        try:
+            self._next_op += 1
+            op_id = self._next_op
+            self._operations[op_id] = ("ble-scan", None)
+            self.busy = True
+            self._refresh_buttons()
+            fut = asyncio.run_coroutine_threadsafe(_op(), _WORKER.loop)
+            fut.add_done_callback(_done)
+            fut.add_done_callback(
+                lambda f: self.queue.put(("op_done", op_id, "ble-scan", None, None)))
+        except Exception as exc:
+            self.console(f"تعذر بدء التشخيص: {exc}", "err")
+            self.busy = False
+            self._refresh_buttons()
 
     def _training_snapshot(self):
         revision, pending, lost = self.queue.training_status()

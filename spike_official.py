@@ -220,64 +220,85 @@ class OfficialBLEHub:
     # ---- connection lifecycle ----
     async def connect(self) -> None:
         self.connection_state_observable.on_next(_ConnectionSubject.CONNECTING)
-        # Discover the hub: match by name OR by service UUID
-        dev = None
-        if self.target_name:
-            dev = await BleakScanner.find_device_by_name(
-                self.target_name, timeout=self.scan_timeout)
-        if dev is None:
-            dev = await BleakScanner.find_device_by_filter(
-                lambda d, adv: LEGO_HUB_SERVICE_UUID.lower() in [
-                    s.lower() for s in (adv.service_uuids or [])],
-                timeout=self.scan_timeout,
-            )
+        dev = await find_official_device(name=self.target_name, timeout=self.scan_timeout)
         if dev is None:
             raise asyncio.TimeoutError(
                 "لم يُعثر على أي روبوت LEGO يعمل بالفيرموير الرسمي عبر البلوتوث"
             )
-        client = BleakClient(dev)
-        await client.connect()
-        self._client = client
         self._name = dev.name or self._name
+        # Windows backend: use cached services to avoid re-pairing prompts.
+        client = BleakClient(dev, timeout=30.0,
+                             disconnected_callback=lambda c: None)
+        await asyncio.wait_for(client.connect(), timeout=30.0)
+        self._client = client
 
-        # Resolve the LEGO Hub UART characteristics (prefer) or fall back to NUS.
+        # امنح ويندوز وقتاً لاكتشاف الخدمات قبل قراءتها.
+        await asyncio.sleep(0.5)
+
         services = client.services
+        # حدد زوج الخصائص (notify + write) من خدمة LEGO Hub، ثم من Nordic UART.
         tx_uuid = rx_uuid = None
+        # خدمة LEGO Hub 1623
         for svc in services:
-            sl = svc.uuid.lower()
-            if sl == LEGO_HUB_SERVICE_UUID:
+            if svc.uuid.lower() == LEGO_HUB_SERVICE_UUID:
                 for ch in svc.characteristics:
-                    props = ch.properties
-                    if "notify" in props:
+                    props = ch.properties or []
+                    if "notify" in props or "indicate" in props:
                         tx_uuid = ch.uuid
-                    elif "write-without-response" in props or "write" in props:
+                    if "write-without-response" in props or "write" in props:
                         rx_uuid = ch.uuid
                 break
+        # إن لم نجد الخدمة الأصلية، ابحث في كل الخدمات عن خصائص notify/write
+        # تحت معرفات LEGO المألوفة في نطاق 1620–1626.
+        if not (tx_uuid and rx_uuid):
+            for svc in services:
+                for ch in svc.characteristics:
+                    cl = ch.uuid.lower()
+                    props = ch.properties or []
+                    if tx_uuid is None and ("notify" in props or "indicate" in props)                             and ("1625" in cl or "6e400003" in cl or cl.endswith("aeef")):
+                        tx_uuid = ch.uuid
+                    if rx_uuid is None and ("write" in props or "write-without-response" in props)                             and ("1624" in cl or "6e400002" in cl or cl.endswith("aeef")):
+                        rx_uuid = ch.uuid
+            # fallback: NUS
         if not (tx_uuid and rx_uuid):
             for svc in services:
                 if svc.uuid.lower() == NUS_SERVICE_UUID:
                     for ch in svc.characteristics:
-                        props = ch.properties
-                        if "notify" in props:
+                        props = ch.properties or []
+                        if "notify" in props and tx_uuid is None:
                             tx_uuid = ch.uuid
-                        elif "write-without-response" in props or "write" in props:
+                        if ("write" in props or "write-without-response" in props) and rx_uuid is None:
                             rx_uuid = ch.uuid
-                    break
+
         if not (tx_uuid and rx_uuid):
+            # سجّل ما وجدناه للمساعدة في التشخيص.
+            svc_info = []
+            for svc in services:
+                svc_info.append(svc.uuid)
             await client.disconnect()
             raise RuntimeError(
-                "لم أجد خدمة LWP3/ UART في إعلان الروبوت — هل الفيرموير الرسمي شغّال؟")
+                "تعذر العثور على خصائص الكتابة والإشعار لدى الروبوت "
+                f"(عدد الخدمات المكتشفة: {len(services)}). "
+                "قد يكون الروبوت متصلاً بتطبيق آخر (مثل LEGO SPIKE/Powered Up). "
+                "أغلق التطبيقات الأخرى، وأوقف البلوتوث ثم شغّله من جديد، وأعد المحاولة.")
         self._tx_uuid, self._rx_uuid = tx_uuid, rx_uuid
 
         await client.start_notify(tx_uuid, self._on_notify)
-        # Ask the hub to push firmware version, name, and battery periodically
-        await self._write(_lwp_hub_property_request(PROP_FW_VERSION))
-        await asyncio.sleep(0.15)
-        await self._write(_lwp_hub_property_request(PROP_BATTERY_VOLTAGE))
-        await asyncio.sleep(0.1)
-        await self._write(_lwp_hub_property_request(PROP_BUTTON))
+        # استفسر عن إصدار الفرموير واسم الجهاز والبطارية (بمهلة بين الأوامر).
+        try:
+            await self._write(_lwp_hub_property_request(PROP_FW_VERSION))
+            await asyncio.sleep(0.3)
+            await self._write(_lwp_hub_property_request(PROP_NAME))
+            await asyncio.sleep(0.3)
+            await self._write(_lwp_hub_property_request(PROP_BATTERY_VOLTAGE))
+            await asyncio.sleep(0.3)
+            await self._write(_lwp_hub_property_request(PROP_BUTTON))
+            await asyncio.sleep(0.2)
+        except Exception as e:
+            # حتى لو فشلت هذه الاستفسارات، الاتصال ناجح ونكمل.
+            pass
 
-        self._app_label = self._name
+        self._app_label = self._name or "LEGO Hub"
         self.connection_state_observable.on_next(_ConnectionSubject.CONNECTED)
         self._emit_status()
 
@@ -301,9 +322,11 @@ class OfficialBLEHub:
     async def _write(self, data: bytes) -> None:
         if self._client is None or self._rx_uuid is None:
             raise RuntimeError("الروبوت غير متصل")
-        # The LWP3 inbox characteristic accepts write-without-response;
-        # fall back to write if needed.
-        await self._client.write_gatt_char(self._rx_uuid, data, response=False)
+        try:
+            await self._client.write_gatt_char(self._rx_uuid, data, response=False)
+        except Exception:
+            # Some backends/characteristics require response=True.
+            await self._client.write_gatt_char(self._rx_uuid, data, response=True)
 
     def _on_notify(self, _sender, data: bytearray) -> None:
         try:
@@ -326,6 +349,14 @@ class OfficialBLEHub:
                 # BCD style: major.minor.bugfix.build (4 bytes)
                 self._fw_parts = tuple(val[:4])
                 self.fw_version = ".".join(str(b) for b in val[:4]) + " (official)"
+            elif prop == PROP_NAME and val:
+                try:
+                    hub_name = val.decode("utf-8", "replace").rstrip("\x00").strip()
+                    if hub_name:
+                        self._name = hub_name
+                        self._app_label = hub_name
+                except Exception:
+                    pass
             elif prop == PROP_BATTERY_VOLTAGE and val:
                 # Single byte percentage, or voltage in some modes; clamp to 0-100
                 self._battery_pct = max(0, min(100, int(val[0])))
@@ -754,22 +785,161 @@ class OfficialUSBCDC:
 # ---------------------------------------------------------------------------
 # Scanning helper: find an official-firmware hub over BLE
 # ---------------------------------------------------------------------------
-async def find_official_device(name: Optional[str] = None, timeout: float = 20.0):
-    """Return a bleak BLEDevice for an official LEGO hub, or None."""
+# Patterns in the local name commonly advertised by official firmware:
+#   * "SPIKE"          (SPIKE Prime default pairing name: SPIKE Prime, Technic SMALL Hub)
+#   * "HUB-"           (MINDSTORMS Robot Inventor default name prefix)
+#   * "TrainHub"       (Powered Up hub)
+#   * "Move Hub"       (Boost)
+# We also fall back to manufacturer-data ID 0x0397 (LEGO System A/S).
+_LEGO_NAME_PREFIXES = ("SPIKE", "HUB-", "HUB ", "TRAIN", "TRAINHUB", "MOVE", "CITY",
+                       "DUPL", "TECHN", "LEGO", "MPY", "CONTROL", "INVENT", "WEDO",
+                       "VIDIYO", "SUPER", "BATMAN", "MARIO")
+_LEGO_MANUFACTURER_ID = 0x0397  # LEGO System A/S
+
+
+async def find_official_device(name: Optional[str] = None, timeout: float = 20.0,
+                               name_hint: Optional[str] = None,
+                               debug_cb=None):
+    """Return a bleak BLEDevice for an official LEGO hub, or None.
+
+    يستخدم BleakScanner.discover(return_adv=True) — الواجهة الأكثر موثوقية
+    عبر الأنظمة (تعمل على ويندوز/لينكس/ماك مع كل إصدارات Bleak).
+    يطبّق نظام نقاط على كل جهة يجدها، ويُعيد أعلاها نقاطاً.
+    """
     if not BLEAK_OK:
         raise RuntimeError(f"bleak غير متوفر: {BLEAK_ERR}")
 
-    def match(d, adv):
-        uuids = [s.lower() for s in (adv.service_uuids or [])]
-        if LEGO_HUB_SERVICE_UUID in uuids:
-            return True
-        return False
+    target_name = (name or name_hint or "").strip()
 
-    if name:
-        dev = await BleakScanner.find_device_by_name(name, timeout=timeout)
-        if dev is not None:
-            return dev
-    return await BleakScanner.find_device_by_filter(match, timeout=timeout)
+    def _get_name(dev, adv):
+        for attr in ("local_name", "_local_name"):
+            v = getattr(adv, attr, None)
+            if v:
+                return v
+        return getattr(dev, "name", None) or ""
+
+    def _make_entry(dev, adv):
+        local = _get_name(dev, adv)
+        uuids = list(getattr(adv, "service_uuids", []) or [])
+        md = getattr(adv, "manufacturer_data", None) or {}
+        rssi = getattr(adv, "rssi", None)
+        txp = getattr(adv, "tx_power", None)
+        return {
+            "name": local,
+            "uuids": uuids,
+            "has_lego_md": _LEGO_MANUFACTURER_ID in md,
+            "rssi": rssi if rssi is not None else txp,
+        }
+
+    # مسح واحد يُعيد كل الأجهزة وبيانات إعلانها.
+    try:
+        discovered = await BleakScanner.discover(
+            timeout=timeout, return_adv=True,
+            scanning_mode="active",
+        )
+    except TypeError:
+        # إصدارات أقدم من bleak لا تقبل scanning_mode.
+        discovered = await BleakScanner.discover(
+            timeout=timeout, return_adv=True)
+
+    # discovered is dict: address -> (BLEDevice, AdvertisementData)
+    seen = {}
+    for addr, (dev, adv) in discovered.items():
+        entry = _make_entry(dev, adv)
+        seen[addr] = entry
+        if debug_cb is not None:
+            try:
+                debug_cb(addr, entry)
+            except Exception:
+                pass
+
+    # مطابقة بالاسم إذا طُلب
+    if target_name:
+        tn_up = target_name.upper()
+        for addr, entry in seen.items():
+            nm = (entry.get("name") or "").upper()
+            if nm == tn_up or (tn_up and nm.startswith(tn_up)):
+                dev = discovered[addr][0]
+                return dev
+            if addr.replace(":", "").upper() == tn_up.replace(":", "").upper():
+                return discovered[addr][0]
+
+    def _score(entry):
+        nm = (entry.get("name") or "").upper()
+        uuids_lc = [u.lower() for u in entry.get("uuids", [])]
+        score = 0
+        if LEGO_HUB_SERVICE_UUID in uuids_lc:
+            score += 200
+        # LEGO Wireless Protocol v3 bootloader/control characteristics
+        for u in uuids_lc:
+            if u.startswith("0000162") or u.startswith("0000162"):
+                score += 100
+                break
+        if entry.get("has_lego_md"):
+            score += 80
+        if any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
+            score += 40
+        # Match by fragment anywhere in name
+        for frag in ("SPIKE", "LEGO", "INVENT", "TECHN", "PRIME",
+                     "MOVE", "BOOST", "CITY", "MARIO", "BATMAN", "POWERED",
+                     "TRAIN", "WEDO", "VIDI"):
+            if frag in nm:
+                score += 10
+        # "HUB" is too generic alone; only count it if combined with another signal
+        if "HUB" in nm and score > 0:
+            score += 5
+        # Penalise pybricks-named devices so they don't get picked in auto mode
+        if "PYBRICK" in nm:
+            score -= 200
+        # NUS alone is ambiguous; only boost it if we already see a LEGO signal.
+        if NUS_SERVICE_UUID in uuids_lc and score > 0:
+            score += 20
+        return score
+
+    best = None
+    best_score = 0
+    for addr, entry in seen.items():
+        s = _score(entry)
+        if s > best_score:
+            best_score = s
+            best = (addr, entry)
+
+    if best is None:
+        return None
+    return discovered[best[0]][0]
+
+
+
+def diagnostic_scan(timeout: float = 8.0):
+    """Perform a raw BLE scan and return a list of
+    (address, name, has_lego_md, uuids, rssi). Uses BleakScanner.discover
+    for best cross-platform reliability.
+    """
+    async def _run():
+        if not BLEAK_OK:
+            raise RuntimeError(f"bleak غير متوفر: {BLEAK_ERR}")
+        try:
+            discovered = await BleakScanner.discover(
+                timeout=timeout, return_adv=True, scanning_mode="active")
+        except TypeError:
+            discovered = await BleakScanner.discover(timeout=timeout, return_adv=True)
+        results = []
+        for addr, (dev, adv) in discovered.items():
+            local = None
+            for attr in ("local_name", "_local_name"):
+                v = getattr(adv, attr, None)
+                if v:
+                    local = v; break
+            if local is None:
+                local = getattr(dev, "name", None) or ""
+            uuids = list(getattr(adv, "service_uuids", []) or [])
+            md = getattr(adv, "manufacturer_data", None) or {}
+            rssi = getattr(adv, "rssi", None)
+            txp = getattr(adv, "tx_power", None)
+            results.append((addr, local, _LEGO_MANUFACTURER_ID in md, uuids,
+                            rssi if rssi is not None else txp))
+        return results
+    return _run()
 
 
 def is_official_firmware_usb(dev) -> bool:

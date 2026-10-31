@@ -88,3 +88,28 @@ class TestUsbHeuristic(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestFirmwareMode(unittest.TestCase):
+    """Tests for firmware-mode label/key normalisation live in spike_core."""
+    def test_validated_config_accepts_new_keys(self):
+        from spike_core import validated_config
+        for key in ("auto", "pybricks", "official-lego"):
+            cfg = validated_config({"firmware_mode": key}, {})
+            self.assertEqual(cfg["firmware_mode"], key)
+
+    def test_validated_config_normalises_legacy_keys(self):
+        from spike_core import validated_config
+        self.assertEqual(
+            validated_config({"firmware_mode": "Pybricks"}, {})["firmware_mode"], "pybricks")
+        self.assertEqual(
+            validated_config({"firmware_mode": "LEGO رسمي"}, {})["firmware_mode"], "official-lego")
+        self.assertEqual(
+            validated_config({"firmware_mode": "LEGO"}, {})["firmware_mode"], "official-lego")
+        self.assertEqual(
+            validated_config({"firmware_mode": "official"}, {})["firmware_mode"], "official-lego")
+
+    def test_validated_config_rejects_unknown(self):
+        from spike_core import validated_config
+        self.assertNotIn("firmware_mode", validated_config({}, {}))
+        self.assertNotIn("firmware_mode", validated_config({"firmware_mode": "bogus"}, {}))
