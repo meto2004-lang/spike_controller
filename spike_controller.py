@@ -1499,10 +1499,12 @@ class App:
                             flags = []
                             if entry.get("has_lego_md"):
                                 flags.append("LEGO manufacturer")
+                            if entry.get("uuids"):
+                                flags.append(f"uuids={len(entry['uuids'])}")
                             nm = entry.get("name") or "(بلا اسم)"
                             rssi = entry.get("rssi")
                             rssi_txt = f" rssi={rssi}" if rssi is not None else ""
-                            self._say(f"[مسح] وجدت: {addr}  name='{nm}'{rssi_txt}  {', '.join(flags) if flags else ''}")
+                            self._say(f"[مسح] وجدت: {addr}  name='{nm}'{rssi_txt}  {' | '.join(flags) if flags else ''}")
 
                         dev = await find_official_device(
                             target or None, timeout=t,
