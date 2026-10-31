@@ -526,10 +526,10 @@ class OfficialUSBREPL:
     async def disconnect(self) -> None:
         self._stop_event.set()
         # If the reader is paused for a REPL command, release it so cancel
-        # can clean it up promptly instead of leaving it stuck on _paused.wait().
+        # can clean it up promptly instead of leaving it stuck on resume.wait().
         if self._pause_reader is not None:
-            self._pause_reader[1].set()  # release paused barrier
-            self._pause_reader[2].set()  # release resume event
+            # _pause_reader = (paused_evt, resume_evt)
+            self._pause_reader[1].set()  # resume the reader
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
@@ -590,7 +590,7 @@ class OfficialUSBREPL:
         deadline = loop.time() + timeout
         buf = b""
         while deadline - loop.time() > 0 and marker not in buf:
-            chunk = await self._read_some(0.2)
+            chunk = await self._read_some(4096, timeout=0.2)
             if chunk:
                 buf += chunk
             else:
@@ -685,13 +685,20 @@ class OfficialUSBREPL:
         reader_paused = asyncio.Event()
         resume_reader = asyncio.Event()
         if self._reader_task is not None and not self._reader_task.done():
+            # Publish the pause request; the reader will set reader_paused
+            # once it has stopped touching the serial port.
             self._pause_reader = (reader_paused, resume_reader)
-            reader_paused.set()
             try:
-                await asyncio.wait_for(resume_reader.wait(), timeout=0.5)
+                await asyncio.wait_for(reader_paused.wait(), timeout=1.0)
             except asyncio.TimeoutError:
                 pass
         try:
+            # Flush any bytes the reader may have left buffered or in-flight
+            # before the pause was observed.
+            try:
+                await loop.run_in_executor(None, lambda: self._ser.reset_input_buffer())
+            except Exception:
+                pass
             banner = await self._reset_to_raw_repl()
             if not quiet and banner.strip():
                 # Deliver any pre-prompt banner to the console (e.g. FW info).
