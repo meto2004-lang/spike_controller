@@ -850,16 +850,42 @@ async def find_official_device(name: Optional[str] = None, timeout: float = 20.0
                 return v
         return getattr(dev, "name", None) or ""
 
+    def _hub_type_from_md(md_bytes: bytes) -> str:
+        # First byte of LEGO manufacturer payload (after the 2-byte company ID)
+        # is the Hub Type / system type ID per LEGO Wireless Protocol 3:
+        #   0x41 WeDo 2.0 (tilt)
+        #   0x42 Boost / Move Hub
+        #   0x43 Powered Up 2-port Hub (Train)
+        #   0x44 Hubs with handset
+        #   0x45 Super Mario / Luigi
+        #   0x46 Luigi standalone?
+        #   0x59 Control+ (Technic Large Hub)
+        #   0x60 SPIKE Prime Hub (SOMBRERO)
+        #   0x61 MINDSTORMS Robot Inventor / SPIKE Prime (converged FW)
+        #   0x80 Remote Control Handset
+        if not md_bytes:
+            return ""
+        b = md_bytes[0]
+        return {
+            0x41: "WeDo", 0x42: "Move/Boost", 0x43: "Train Hub",
+            0x44: "Handset", 0x45: "Mario", 0x46: "Luigi",
+            0x59: "Technic L", 0x60: "SPIKE Prime",
+            0x61: "SPIKE/Inventor", 0x80: "Remote",
+        }.get(b, f"type=0x{b:02x}")
+
     def _make_entry(dev, adv):
         local = _get_name(dev, adv)
         uuids = list(getattr(adv, "service_uuids", []) or [])
         md = getattr(adv, "manufacturer_data", None) or {}
         rssi = getattr(adv, "rssi", None)
         txp = getattr(adv, "tx_power", None)
+        lego_md = md.get(_LEGO_MANUFACTURER_ID)
+        hub_type = _hub_type_from_md(lego_md) if lego_md else ""
         return {
             "name": local,
             "uuids": uuids,
             "has_lego_md": _LEGO_MANUFACTURER_ID in md,
+            "hub_type": hub_type,
             "rssi": rssi if rssi is not None else txp,
         }
 
@@ -896,34 +922,41 @@ async def find_official_device(name: Optional[str] = None, timeout: float = 20.0
             if addr.replace(":", "").upper() == tn_up.replace(":", "").upper():
                 return discovered[addr][0]
 
+    # أنواع الروبوتات القابلة للبرمجة (بايثون) التي نهتم بالاتصال بها.
+    _PROGRAMMABLE_HUB_TYPES = {"SPIKE Prime", "SPIKE/Inventor", "Technic L"}
+
     def _score(entry):
         nm = (entry.get("name") or "").upper()
         uuids_lc = [u.lower() for u in entry.get("uuids", [])]
+        hub_type = entry.get("hub_type") or ""
         score = 0
         if LEGO_HUB_SERVICE_UUID in uuids_lc:
-            score += 200
-        # LEGO Wireless Protocol v3 bootloader/control characteristics
-        for u in uuids_lc:
-            if u.startswith("0000162") or u.startswith("0000162"):
-                score += 100
-                break
+            score += 300
+        if any(u.startswith("0000162") for u in uuids_lc):
+            score += 100
         if entry.get("has_lego_md"):
             score += 80
+        # الأفضلية للروبوتات القابلة للبرمجة (SPIKE/Inventor/Technic L).
+        if hub_type in _PROGRAMMABLE_HUB_TYPES:
+            score += 500
+        # ألعاب/أجهزة تحكم — لا نريدها هدفاً للاتصال.
+        if hub_type in ("Mario", "Luigi", "Handset", "Remote"):
+            score -= 500
+        elif hub_type in ("Move/Boost", "Train Hub", "WeDo"):
+            score -= 50
         if any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
             score += 40
-        # Match by fragment anywhere in name
-        for frag in ("SPIKE", "LEGO", "INVENT", "TECHN", "PRIME",
-                     "MOVE", "BOOST", "CITY", "MARIO", "BATMAN", "POWERED",
+        for frag in ("SPIKE", "PRIME", "INVENT", "TECHN"):
+            if frag in nm:
+                score += 30
+        for frag in ("LEGO", "MOVE", "BOOST", "CITY", "POWERED",
                      "TRAIN", "WEDO", "VIDI"):
             if frag in nm:
                 score += 10
-        # "HUB" is too generic alone; only count it if combined with another signal
-        if "HUB" in nm and score > 0:
+        if "HUB" in nm and score > 50:
             score += 5
-        # Penalise pybricks-named devices so they don't get picked in auto mode
         if "PYBRICK" in nm:
-            score -= 200
-        # NUS alone is ambiguous; only boost it if we already see a LEGO signal.
+            score -= 500
         if NUS_SERVICE_UUID in uuids_lc and score > 0:
             score += 20
         return score

@@ -1499,6 +1499,9 @@ class App:
                             flags = []
                             if entry.get("has_lego_md"):
                                 flags.append("LEGO manufacturer")
+                            ht = entry.get("hub_type")
+                            if ht:
+                                flags.append(f"hub={ht}")
                             if entry.get("uuids"):
                                 flags.append(f"uuids={len(entry['uuids'])}")
                             nm = entry.get("name") or "(بلا اسم)"
@@ -2209,6 +2212,7 @@ class App:
                 tags = []
                 if has_lego:
                     tags.append("LEGO manufacturer(0x0397)")
+                # hub type is not captured in diagnostic_scan's simple form; no-op
                 if any(u.lower().startswith("00001623") or "1623-" in u.lower() for u in uuids):
                     tags.append("LEGO Hub service")
                 if any("6e400001" in u.lower() for u in uuids):
