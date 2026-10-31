@@ -758,17 +758,18 @@ _LEGO_MANUFACTURER_ID = 0x0397  # LEGO System A/S
 
 
 async def find_official_device(name: Optional[str] = None, timeout: float = 20.0,
-                               name_hint: Optional[str] = None):
+                               name_hint: Optional[str] = None,
+                               debug_cb=None):
     """Return a bleak BLEDevice for an official LEGO hub, or None.
 
-    Discovery uses three filters (any hit qualifies):
-      1. Exact/local name match (if user typed a name in the target field).
-      2. Advertised LEGO Hub service UUID (``1623-…``) or Nordic UART fallback.
-      3. BLE manufacturer data with LEGO's company ID (0x0397) **and** a
-         local name that starts with a known LEGO hub prefix.
-      4. Local name starts with one of the common LEGO hub prefixes even when
-         no service UUIDs are advertised (some firmware builds hide services
-         until pairing).
+    يقوم بمسح خام أولاً ويسجّل كل ما يراه (للتشخيص) ثم يطابق بأولوية
+    متدرجة:
+      1. اسم مطابق لما كتبه المستخدم.
+      2. أي جهة تعلن خدمة LEGO Hub الرسمية 0x1623.
+      3. أي جهاز بمعرّف المصنّع LEGO (0x0397) — SPIKE Prime وRobot Inventor
+         وPowered Up وMario وBatman وجميع أجهزة LEGO الحديثة تحمله.
+      4. اسم محلي يبدأ ببادئة LEGO معروفة حتى وإن لم تُعلن UUIDs أو
+         manufacturer_data (بعض إصدارات الفيرموير الرسمي تخفيها قبل الاقتران).
     """
     if not BLEAK_OK:
         raise RuntimeError(f"bleak غير متوفر: {BLEAK_ERR}")
@@ -780,39 +781,151 @@ async def find_official_device(name: Optional[str] = None, timeout: float = 20.0
         if dev is not None:
             return dev
 
-    def _name(d, adv) -> str:
-        local = getattr(adv, "local_name", None) or ""
-        return (local or (getattr(d, "name", "") or "")).upper()
+    # مسح خام مع تسجيل تشخيصي.
+    seen = {}
 
-    def match(d, adv):
-        uuids = [s.lower() for s in (adv.service_uuids or [])]
-        if LEGO_HUB_SERVICE_UUID in uuids:
-            return True
-        if NUS_SERVICE_UUID in uuids:
-            # NUS alone is ambiguous (lots of devices advertise it). Only accept
-            # it when the name also looks like a LEGO hub.
-            nm = _name(d, adv)
-            if any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
-                return True
-            return False
-        # Manufacturer data filter
+    def _get_name(dev, adv):
+        for attr in ("local_name", "_local_name"):
+            v = getattr(adv, attr, None)
+            if v:
+                return v
+        return getattr(dev, "name", None) or ""
+
+    def _adv(dev, adv):
+        addr = getattr(dev, "address", "?")
+        local = _get_name(dev, adv)
+        uuids = list(getattr(adv, "service_uuids", []) or [])
         md = getattr(adv, "manufacturer_data", None) or {}
-        if _LEGO_MANUFACTURER_ID in md:
-            nm = _name(d, adv)
-            # Accept any LEGO-manufacturer device whose name starts with one of
-            # the known hub prefixes (avoids picking up LEGO remotes/handset).
-            if nm and any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
-                return True
-        # Name-only fallback (some FW builds hide all service UUIDs before pairing).
-        nm = _name(d, adv)
-        if nm and any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
-            # Extra guard: device must also have address (it will) and a
-            # transmit power/rssi to avoid phantom entries.
-            if getattr(d, "address", None):
-                return True
-        return False
+        rssi = getattr(adv, "rssi", None)
+        txp = getattr(adv, "tx_power", None)
+        entry = {
+            "name": local,
+            "uuids": uuids,
+            "has_lego_md": _LEGO_MANUFACTURER_ID in md,
+            "rssi": rssi if rssi is not None else txp,
+        }
+        seen[addr] = entry
+        if debug_cb is not None:
+            try:
+                debug_cb(addr, entry)
+            except Exception:
+                pass
 
-    return await BleakScanner.find_device_by_filter(match, timeout=timeout)
+    scanner = BleakScanner(detection_callback=_adv)
+    try:
+        await scanner.start()
+        await asyncio.sleep(timeout)
+    finally:
+        try:
+            await scanner.stop()
+        except Exception:
+            pass
+
+    def _name(entry):
+        return (entry.get("name") or "").upper()
+
+    candidates = []
+    for addr, entry in seen.items():
+        nm = _name(entry)
+        uuids_lc = [u.lower() for u in entry["uuids"]]
+        score = 0
+        if LEGO_HUB_SERVICE_UUID in uuids_lc:
+            score += 100
+        if entry["has_lego_md"]:
+            score += 50
+        if any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
+            score += 20
+        if "spike" in nm or "hub" in nm or "lego" in nm or "mpy" in nm or "inventor" in nm:
+            score += 10
+        if NUS_SERVICE_UUID in uuids_lc and (entry["has_lego_md"] or score > 0):
+            score += 5
+        if score > 0:
+            candidates.append((score, addr, entry))
+
+    candidates.sort(key=lambda x: (-x[0], -(x[2].get("rssi") or -999)))
+
+    if not candidates:
+        return None
+
+    best_addr = candidates[0][1]
+    best_name = candidates[0][2].get("name") or ""
+    # استخرج كائن BLEDevice من قائمة الأجهزة المكتشفة في المسح الحالي.
+    try:
+        discovered_devices = scanner.discovered_devices_and_advertisement_data
+        for d, _adv in discovered_devices.values() if hasattr(discovered_devices, "values") else []:
+            pass
+    except Exception:
+        discovered_devices = None
+
+    chosen = None
+    try:
+        dd = getattr(scanner, "discovered_devices_and_advertisement_data", None)
+        if isinstance(dd, dict):
+            entry = dd.get(best_addr)
+            if entry is not None:
+                chosen = entry[0] if isinstance(entry, (list, tuple)) else entry
+        if chosen is None:
+            dd_list = getattr(scanner, "discovered_devices", None)
+            if dd_list:
+                for d in dd_list:
+                    if getattr(d, "address", None) == best_addr:
+                        chosen = d
+                        break
+    except Exception:
+        chosen = None
+
+    if chosen is None:
+        # Fallback: إعادة مسح قصيرة بالفلتر على العنوان/الاسم.
+        def _match_addr(d, adv):
+            return getattr(d, "address", None) == best_addr
+        try:
+            chosen = await BleakScanner.find_device_by_filter(_match_addr, timeout=max(3.0, timeout / 4))
+        except Exception:
+            chosen = None
+        if chosen is None and best_name:
+            try:
+                chosen = await BleakScanner.find_device_by_name(best_name, timeout=max(3.0, timeout / 4))
+            except Exception:
+                chosen = None
+    return chosen
+
+
+def diagnostic_scan(timeout: float = 8.0):
+    """Return (coroutine that produces) a list of (address, name, has_lego, uuids, rssi)."""
+    async def _run():
+        if not BLEAK_OK:
+            raise RuntimeError(f"bleak غير متوفر: {BLEAK_ERR}")
+        found = []
+        stop_event = asyncio.Event()
+        seen = {}
+
+        def _get_name2(dev, adv):
+            for attr in ("local_name", "_local_name"):
+                v = getattr(adv, attr, None)
+                if v:
+                    return v
+            return getattr(dev, "name", None) or ""
+        def _adv(dev, adv):
+            addr = getattr(dev, "address", "?")
+            local = _get_name2(dev, adv)
+            uuids = list(getattr(adv, "service_uuids", []) or [])
+            md = getattr(adv, "manufacturer_data", None) or {}
+            rssi = getattr(adv, "rssi", None)
+            txp = getattr(adv, "tx_power", None)
+            seen[addr] = (local, _LEGO_MANUFACTURER_ID in md, uuids,
+                          rssi if rssi is not None else txp)
+
+        scanner = BleakScanner(detection_callback=_adv)
+        try:
+            await scanner.start()
+            await asyncio.sleep(timeout)
+        finally:
+            try:
+                await scanner.stop()
+            except Exception:
+                pass
+        return [(addr, *info) for addr, info in seen.items()]
+    return _run()
 
 
 def is_official_firmware_usb(dev) -> bool:

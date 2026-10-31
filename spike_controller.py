@@ -43,7 +43,7 @@ from spike_transfer import (TransferFailure, configure_ble_upload, needs_fresh_s
 from spike_official import (OfficialBLEHub, OfficialUSBCDC, BLEAK_OK as OFFICIAL_BLEAK_OK,
                             BLEAK_ERR as OFFICIAL_BLEAK_ERR, SERIAL_OK as OFFICIAL_SERIAL_OK,
                             SERIAL_ERR as OFFICIAL_SERIAL_ERR, is_official_firmware_usb,
-                            LEGO_HUB_SERVICE_UUID, find_official_device)
+                            LEGO_HUB_SERVICE_UUID, find_official_device, diagnostic_scan)
 
 # مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -674,7 +674,8 @@ class App:
         for key, title, icon, command, shortcut in (
                 ("race", "توليد ملف سباق", "race", self.action_race_gen, "Ctrl+G"),
                 ("clear", "جلسة جديدة / مسح", "new", self.action_clear_console, "Ctrl+L"),
-                ("export", "تصدير السجل", "export", self.action_export_log, "")):
+                ("export", "تصدير السجل", "export", self.action_export_log, ""),
+                ("scan", "تشخيص البلوتوث", "bluetooth", self.action_ble_diagnostics, "")):
             self._add_toolbar_action(self.tools_menu, key, title, icon, command, shortcut)
         target = ttk.Frame(self.toolbar)
         target.grid(row=0, column=6, sticky="ew", padx=(8, 0))
@@ -1488,9 +1489,25 @@ class App:
                         break
                     try:
                         t = scan if attempt == 1 else max(10, scan // 2)
+                        self._say(f"[مسح] جاري فحص أجهزة البلوتوث لمدة {int(t)} ثانية...", "info")
+                        _seen = set()
+
+                        def _dbg(addr, entry):
+                            if addr in _seen:
+                                return
+                            _seen.add(addr)
+                            flags = []
+                            if entry.get("has_lego_md"):
+                                flags.append("LEGO manufacturer")
+                            nm = entry.get("name") or "(بلا اسم)"
+                            rssi = entry.get("rssi")
+                            rssi_txt = f" rssi={rssi}" if rssi is not None else ""
+                            self._say(f"[مسح] وجدت: {addr}  name='{nm}'{rssi_txt}  {', '.join(flags) if flags else ''}")
+
                         dev = await find_official_device(
                             target or None, timeout=t,
                             name_hint=target or None,
+                            debug_cb=_dbg,
                         )
                     except asyncio.TimeoutError:
                         self._say("انتهت مهلة البحث عن روبوت الفيرموير الرسمي (بلوتوث)", "err")
@@ -2156,6 +2173,69 @@ class App:
             self.console(f"صُدّر السجل: {p}", "ok")
         except Exception as e:
             messagebox.showerror("خطأ", f"تعذر التصدير:\n{e}")
+
+    def action_ble_diagnostics(self):
+        """مسح خام لجميع أجهزة BLE القريبة وطباعة معلوماتها في الكونسول."""
+        if self.busy or self._closing:
+            self.console("أكمل العملية الحالية أولاً", "info")
+            return
+        if not OFFICIAL_BLEAK_OK and not PB_OK:
+            self.console(f"مكتبة البلوتوث غير متوفرة: {OFFICIAL_BLEAK_ERR or PB_ERR}", "err")
+            return
+        self.console("=== تشخيص البلوتوث: جاري المسح لمدة 8 ثوانٍ ===", "info")
+
+        async def _op():
+            return await diagnostic_scan(timeout=8.0)
+
+        def _done(fut):
+            try:
+                res = fut.result()
+            except Exception as exc:
+                self.queue.put(("console", f"فشل التشخيص: {exc}", "err"))
+                return
+            self.queue.put(("console", f"=== انتهى المسح: وُجد {len(res)} جهاز ===", "info"))
+            if not res:
+                self.queue.put(("console",
+                                "لم يُكتشف أي جهاز بلوتوث. تحقق من أن محوّل البلوتوث شغّال، "
+                                "ومن صلاحيات الوصول إليه، وأن البلوتوث في ويندوز غير محجوب "
+                                "لتطبيق آخر.",
+                                "err"))
+                return
+            lego_like = 0
+            for addr, name, has_lego, uuids, rssi in sorted(
+                    res, key=lambda x: (x[4] if x[4] is not None else -999), reverse=True):
+                tags = []
+                if has_lego:
+                    tags.append("LEGO manufacturer(0x0397)")
+                if any(u.lower().startswith("00001623") or "1623-" in u.lower() for u in uuids):
+                    tags.append("LEGO Hub service")
+                if any("6e400001" in u.lower() for u in uuids):
+                    tags.append("NUS")
+                nm = (name or "(بلا اسم)").lower()
+                if "spike" in nm or nm.startswith("hub-") or "lego" in nm or "inventor" in nm or "mpy" in nm:
+                    lego_like += 1
+                self.queue.put((
+                    "console",
+                    f"  {addr}  name='{name or '(بلا اسم)'}'  "
+                    f"rssi={rssi if rssi is not None else '?'}  "
+                    f"uuids={len(uuids)}  {' | '.join(tags) if tags else ''}",
+                    "ok" if tags else "out"))
+            self.queue.put(("console", f"منها {lego_like} جهة تبدو كأنها من LEGO.", "info"))
+
+        try:
+            self._next_op += 1
+            op_id = self._next_op
+            self._operations[op_id] = ("ble-scan", None)
+            self.busy = True
+            self._refresh_buttons()
+            fut = asyncio.run_coroutine_threadsafe(_op(), _WORKER.loop)
+            fut.add_done_callback(_done)
+            fut.add_done_callback(
+                lambda f: self.queue.put(("op_done", op_id, "ble-scan", None, None)))
+        except Exception as exc:
+            self.console(f"تعذر بدء التشخيص: {exc}", "err")
+            self.busy = False
+            self._refresh_buttons()
 
     def _training_snapshot(self):
         revision, pending, lost = self.queue.training_status()
