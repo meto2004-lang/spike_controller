@@ -40,6 +40,10 @@ from spike_icons import ICON_PATHS, icon_pixels
 from spike_transfer import (TransferFailure, configure_ble_upload, needs_fresh_status,
                             trace_upload_writes, transfer_environment, wait_hub_idle,
                             upload_progress, finish_upload_progress)
+from spike_official import (OfficialBLEHub, OfficialUSBCDC, BLEAK_OK as OFFICIAL_BLEAK_OK,
+                            BLEAK_ERR as OFFICIAL_BLEAK_ERR, SERIAL_OK as OFFICIAL_SERIAL_OK,
+                            SERIAL_ERR as OFFICIAL_SERIAL_ERR, is_official_firmware_usb,
+                            LEGO_HUB_SERVICE_UUID, find_official_device)
 
 # مسار التطبيق أولاً (نحتاجه لتهيئة سجل المخرجات)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -110,6 +114,7 @@ DEFAULTS = {
     "recent": [],
     "autoconnect": False,
     "hub_name": "",
+    "firmware_mode": "auto",
 }
 
 SETUP_TEMPLATE = '''\
@@ -350,7 +355,9 @@ class App:
             self.console(f"تعذر تحميل pybricksdev: {PB_ERR}", "err")
             self.console("ثبّته بـ: python -m pip install -r requirements.txt", "info")
 
-        self.console("مرحباً — اضغط «بلوتوث» بعد تشغيل الروبوت (F1 للمساعدة)", "info")
+        self.console("مرحباً — اضغط «بلوتوث» أو «اتصال USB» بعد تشغيل الروبوت (F1 للمساعدة)", "info")
+        self.console(f"وضع الفرموير الحالي: {self._fw_label(self.cfg.get('firmware_mode', 'auto'))}  "
+                     "(يمكن تبديله من قائمة «الفرموير» في شريط الأدوات)", "info")
 
         if self.cfg.get("autoconnect"):
             self.root.after(500, self.action_connect)
@@ -480,7 +487,7 @@ class App:
                      lightcolor=self.WARN, darkcolor=self.WARN)
 
     def _build_ui(self) -> None:
-        self.root.title("Hyena Control — تحكم روبوت SPIKE Prime (Pybricks)")
+        self.root.title("Hyena Control — تحكم روبوت SPIKE Prime")
         try:
             self.root.geometry(self.cfg.get("geometry", DEFAULTS["geometry"]))
         except Exception:
@@ -648,6 +655,25 @@ class App:
             self._add_toolbar_action(self.tools_menu, key, title, icon, command, shortcut)
         target = ttk.Frame(self.toolbar)
         target.grid(row=0, column=6, sticky="ew", padx=(8, 0))
+        self._fw_internal = self.cfg.get("firmware_mode", "auto")
+        self.firmware_var = tk.StringVar(value=self._fw_label(self._fw_internal))
+        fw_frame = ttk.Frame(target)
+        fw_frame.pack(side="right", padx=(6, 0))
+        ttk.Label(fw_frame, text=to_visual("الفرموير:"), style="Header.TLabel").pack(side="right", padx=2)
+        self.fw_combo = ttk.Combobox(fw_frame, textvariable=self.firmware_var, width=14, state="readonly",
+                                     values=(to_visual("تلقائي"), "Pybricks", to_visual("LEGO رسمي")))
+        self.fw_combo.pack(side="right")
+        self.fw_combo.bind("<<ComboboxSelected>>", lambda e: self._save_firmware_mode())
+
+    @staticmethod
+    def _fw_label(mode: str) -> str:
+        return {"auto": "تلقائي", "Pybricks": "Pybricks", "LEGO رسمي": "LEGO رسمي"}.get(mode, "تلقائي")
+
+    @staticmethod
+    def _fw_from_label(label: str) -> str:
+        table = {"تلقائي": "auto", "Pybricks": "Pybricks", "LEGO رسمي": "LEGO رسمي",
+                 "auto": "auto"}
+        return table.get(label, "auto")
         ttk.Label(target, text=to_visual("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
         self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
         self.target_entry = ttk.Entry(target, textvariable=self.target_var, width=1)
@@ -712,6 +738,13 @@ class App:
             finally:
                 self.session_file = None
 
+    def _save_firmware_mode(self):
+        mode = self._fw_from_label(self.firmware_var.get())
+        if mode in ("auto", "Pybricks", "LEGO رسمي"):
+            self.cfg["firmware_mode"] = mode
+            self._fw_internal = mode
+            self.console(f"تم تبديل وضع الفرموير إلى: {self._fw_label(mode)}", "info")
+
     def _build_menu(self) -> None:
         menubar = tk.Menu(self.root)
 
@@ -773,8 +806,9 @@ class App:
         m_help.add_command(label="شرح الاستخدام", accelerator="F1", command=self.action_help)
         m_help.add_command(label="عن التطبيق", command=lambda: messagebox.showinfo(
             "عن التطبيق",
-            "Hyena Control 1.0\nتطبيق تحكم بروبوت SPIKE Prime (Pybricks) عبر البلوتوث\n"
-            "يعتمد على pybricksdev + bleak"))
+            "Hyena Control 1.1\nتطبيق تحكم بروبوت SPIKE Prime عبر البلوتوث والسلك\n"
+            "يدعم فيرموير Pybricks والفيرموير الرسمي من LEGO\n"
+            "يعتمد على pybricksdev + bleak (Pybricks) وbleak/pyserial (LEGO رسمي)"))
         menubar.add_cascade(label="مساعدة", menu=m_help)
 
         self.root.config(menu=menubar)
@@ -1334,102 +1368,188 @@ class App:
             raise RuntimeError("غير متصل بالروبوت — اضغط «بلوتوث» أولاً")
         return self._worker_hub
 
+    def _firmware_modes_wanted(self):
+        """Return ordered list of firmware backends to try: 'pybricks' and/or 'official'."""
+        mode = self.cfg.get("firmware_mode", "auto")
+        if mode == "Pybricks":
+            return ["pybricks"]
+        if mode == "LEGO رسمي":
+            return ["official"]
+        return ["pybricks", "official"]
+
     async def op_connect(self, target=None):
-        if not PB_OK:
-            raise RuntimeError(f"pybricksdev غير متوفر: {PB_ERR}")
+        wanted = self._firmware_modes_wanted()
         scan = int(self.cfg.get("scan_timeout", 20))
         retries = int(self.cfg.get("retries", 6))
-        for attempt in range(1, retries + 1):
-            self._say(f"المحاولة {attempt}/{retries} — جاري البحث عن الروبوت...")
-            try:
-                dev = await find_device(target or None, timeout=scan)
-            except asyncio.TimeoutError:
-                self._say("لم يُعثر على الروبوت — تأكد أنه مضاء ويرمش أزرق", "err")
-                continue
-            hub = PybricksHubBLE(dev)
-            try:
-                await asyncio.wait_for(hub.connect(), timeout=60)
-            except asyncio.CancelledError:
-                await asyncio.wait_for(hub.disconnect(), timeout=5)
-                raise
-            except Exception as e:
-                self._say(f"فشل الاتصال: {type(e).__name__}: {e}", "err")
-                try:
-                    await asyncio.wait_for(hub.disconnect(), timeout=5)
-                except Exception:
-                    pass
-                continue
-            self._say(f"تم الاتصال بـ {dev.name} — الفرموير {hub.fw_version}", "ok")
-            hub._app_label = str(dev.name)
-            self._worker_hub = hub
-            try:
-                advertised, effective = configure_ble_upload(hub)
-                self._say(f"[TX] BLE write_size={effective} hub_limit={advertised}")
-                self._say(f"[TX] {transfer_environment(hub)}")
-                self._install_capture(hub)
-            except BaseException:
-                await asyncio.wait_for(hub.disconnect(), timeout=5)
-                self._worker_hub = None
-                raise
-            return hub
-        raise RuntimeError(f"لم يتم الاتصال بعد {retries} محاولات")
+        last_err = None
+        for backend in wanted:
+            for attempt in range(1, retries + 1):
+                label = "Pybricks" if backend == "pybricks" else "الفيرموير الرسمي (LEGO)"
+                self._say(f"[{label}] المحاولة {attempt}/{retries} — جاري البحث عن الروبوت...")
+                if backend == "pybricks":
+                    if not PB_OK:
+                        last_err = f"pybricksdev غير متوفر: {PB_ERR}"
+                        break
+                    try:
+                        dev = await find_device(target or None, timeout=scan // max(1, len(wanted)))
+                    except asyncio.TimeoutError:
+                        self._say("لم يُعثر على روبوت Pybricks — سأحاول الفيرموير الرسمي إن اخترت الوضع التلقائي",
+                                  "info" if "official" in wanted else "err")
+                        continue
+                    hub = PybricksHubBLE(dev)
+                    try:
+                        await asyncio.wait_for(hub.connect(), timeout=60)
+                    except asyncio.CancelledError:
+                        await asyncio.wait_for(hub.disconnect(), timeout=5)
+                        raise
+                    except Exception as e:
+                        self._say(f"فشل الاتصال بـ Pybricks: {type(e).__name__}: {e}", "err")
+                        try:
+                            await asyncio.wait_for(hub.disconnect(), timeout=5)
+                        except Exception:
+                            pass
+                        last_err = str(e)
+                        continue
+                    self._say(f"تم الاتصال بـ {dev.name} — الفرموير {hub.fw_version}", "ok")
+                    hub._app_label = str(dev.name)
+                    self._worker_hub = hub
+                    try:
+                        if not self._is_official_hub(hub):
+                            advertised, effective = configure_ble_upload(hub)
+                            self._say(f"[TX] BLE write_size={effective} hub_limit={advertised}")
+                            self._say(f"[TX] {transfer_environment(hub)}")
+                        self._install_capture(hub)
+                    except BaseException:
+                        await asyncio.wait_for(hub.disconnect(), timeout=5)
+                        self._worker_hub = None
+                        raise
+                    return hub
+                else:  # official firmware via BLE (LWP3)
+                    if not OFFICIAL_BLEAK_OK:
+                        last_err = f"مكتبة bleak غير متوفرة للفيرموير الرسمي: {OFFICIAL_BLEAK_ERR}"
+                        break
+                    try:
+                        dev = await find_official_device(target or None, timeout=scan // max(1, len(wanted)))
+                    except asyncio.TimeoutError:
+                        self._say("لم يُعثر على روبوت بالفيرموير الرسمي", "err")
+                        continue
+                    if dev is None:
+                        self._say("لم يُعثر على روبوت LEGO رسمي عبر البلوتوث", "info")
+                        continue
+                    hub = OfficialBLEHub(target_name=target, scan_timeout=scan // max(1, len(wanted)))
+                    try:
+                        await asyncio.wait_for(hub.connect(), timeout=60)
+                    except asyncio.CancelledError:
+                        await hub.disconnect()
+                        raise
+                    except Exception as e:
+                        self._say(f"فشل الاتصال بالفيرموير الرسمي: {type(e).__name__}: {e}", "err")
+                        try:
+                            await hub.disconnect()
+                        except Exception:
+                            pass
+                        last_err = str(e)
+                        continue
+                    self._say(f"تم الاتصال بـ {hub._app_label} — الفرموير {hub.fw_version}", "ok")
+                    self._say(
+                        "ملاحظة: الفيرموير الرسمي لا يدعم رفع بايثون عبر البلوتوث. "
+                        "لإرسال البرامج استخدم «اتصال USB» (منفذ REPL).", "info")
+                    self._worker_hub = hub
+                    try:
+                        self._install_capture(hub)
+                    except BaseException:
+                        await hub.disconnect()
+                        self._worker_hub = None
+                        raise
+                    return hub
+        raise RuntimeError(last_err or f"لم يتم الاتصال بعد {retries} محاولات")
+
+    def _is_official_hub(self, hub) -> bool:
+        return getattr(hub, "_app_is_official", False) is True
 
     async def op_connect_usb(self):
-        """اتصال عبر كابل USB — يفحص دعم الفرموير أولاً"""
+        """اتصال عبر كابل USB — يختار تلقائياً مسار Pybricks أو الفيرموير الرسمي."""
+        wanted = self._firmware_modes_wanted()
+        dev = None
+        classes = []
+        # 1) Pybricks USB path (vendor-specific 0xFF interface).
+        if "pybricks" in wanted and PB_OK:
+            try:
+                import usb.core
+                import usb.backend.libusb1
+                import libusb_package
+            except Exception as e:
+                raise RuntimeError(f"مكتبات USB غير مكتملة: {e}")
+            backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
+            if backend is not None:
+                dev = usb.core.find(idVendor=0x0694, idProduct=0x0009, backend=backend)
+                if dev is not None:
+                    try:
+                        cfgs = dev.configurations()
+                        if cfgs:
+                            classes = [i.bInterfaceClass for i in cfgs[0]]
+                    except Exception as exc:
+                        raise RuntimeError("تعذر قراءة واجهات USB؛ تحقق من التعريفات والصلاحيات") from exc
+                    self._say("كابل USB مكتشف — الواجهات: " +
+                              (", ".join(hex(c) for c in classes) if classes else "؟"), "info")
+                    if 0xFF in classes:
+                        hub = PybricksHubUSB(dev)
+                        try:
+                            await asyncio.wait_for(hub.connect(), timeout=60)
+                        except BaseException:
+                            try:
+                                await asyncio.wait_for(hub.disconnect(), timeout=5)
+                            except Exception:
+                                traceback.print_exc()
+                            raise
+                        self._worker_hub = hub
+                        hub._app_label = "USB سلك"
+                        self._say(f"اتصال سلك ناجح (Pybricks)! — الفرموير {hub.fw_version}", "ok")
+                        try:
+                            self._install_capture(hub)
+                        except BaseException:
+                            await asyncio.wait_for(hub.disconnect(), timeout=5)
+                            self._worker_hub = None
+                            raise
+                        return hub
+
+        # 2) Official-firmware USB CDC (MicroPython raw REPL) path.
+        if "official" in wanted:
+            port = self._find_hub_port()
+            if port:
+                self._say(f"تم العثور على منفذ REPL الرسمي: {port}", "info")
+                hub = OfficialUSBCDC(port)
+                try:
+                    await asyncio.wait_for(hub.connect(), timeout=30)
+                except BaseException:
+                    try:
+                        await hub.disconnect()
+                    except Exception:
+                        traceback.print_exc()
+                    raise
+                self._worker_hub = hub
+                self._say(f"اتصال سلك ناجح (فيرموير رسمي)! — الفرموير {hub.fw_version}", "ok")
+                try:
+                    self._install_capture(hub)
+                except BaseException:
+                    await hub.disconnect()
+                    self._worker_hub = None
+                    raise
+                return hub
+            if dev is not None and 0xFF not in classes and "pybricks" in wanted:
+                # Device present but no 0xFF and no COM port found
+                self._say("رُصد الروبوت على USB لكن واجهة Pybricks (0xFF) غير موجودة، "
+                          "ولم أتعرف على منفذ CDC/REPL. ثبّت تعريفات LEGO أو استخدم البلوتوث.", "err")
+                raise RuntimeError("الكابل موجود لكن لا توجد واجهة Pybricks ولا منفذ REPL")
+
         if not PB_OK:
             raise RuntimeError(f"pybricksdev غير متوفر: {PB_ERR}")
-        try:
-            import usb.core
-            import usb.backend.libusb1
-            import libusb_package
-        except Exception as e:
-            raise RuntimeError(f"مكتبات USB غير مكتملة: {e}")
-
-        backend = usb.backend.libusb1.get_backend(find_library=libusb_package.find_library)
-        if backend is None:
-            raise RuntimeError("تعذر تحميل مكتبة libusb")
-
-        dev = usb.core.find(idVendor=0x0694, idProduct=0x0009, backend=backend)
         if dev is None:
             raise RuntimeError("الروبوت غير موصول بالسلك — وصّل كابل USB أولاً")
-
-        # فحص الواجهات: هل يوجد واجهة Pybricks خاصة (0xFF)؟
-        classes = []
-        try:
-            cfgs = dev.configurations()
-            if cfgs:
-                classes = [i.bInterfaceClass for i in cfgs[0]]
-        except Exception as exc:
-            raise RuntimeError("تعذر قراءة واجهات USB؛ تحقق من التعريفات والصلاحيات") from exc
-        self._say("كابل USB مكتشف — الواجهات: " +
-                  (", ".join(hex(c) for c in classes) if classes else "؟"), "info")
-
-        if 0xFF not in classes:
-            self._say("فيرومور SPIKE Prime الحالي يعرض على السلك منفذ COM فقط (CDC) —", "err")
-            self._say("لا يدعم رفع/تشغيل البرامج بالسلك. الرفع يبقى عبر البلوتوث.", "info")
-            self._say("الدعم التجريبي للسلك يتطلب بناء فيرموير مخصصاً من labs.pybricks.com (غير موصى به قبل المسابقة).", "info")
-            raise RuntimeError("الكابل يعمل للشحن والاستقبال فقط على فيرمويرك الحالي")
-
-        # واجهة Pybricks موجودة ← مسار كامل ممكن
-        hub = PybricksHubUSB(dev)
-        try:
-            await asyncio.wait_for(hub.connect(), timeout=60)
-        except BaseException:
-            try:
-                await asyncio.wait_for(hub.disconnect(), timeout=5)
-            except Exception:
-                traceback.print_exc()
-            raise
-        self._worker_hub = hub
-        hub._app_label = "USB سلك"
-        self._say(f"اتصال سلك ناجح! {getattr(hub, '_hub_name', '')} — الفرموير {hub.fw_version}", "ok")
-        try:
-            self._install_capture(hub)
-        except BaseException:
-            await asyncio.wait_for(hub.disconnect(), timeout=5)
-            self._worker_hub = None
-            raise
-        return hub
+        # Only Pybricks wanted but no 0xFF interface
+        self._say("فيرموير SPIKE الحالي لا يعرض واجهة Pybricks (0xFF) على السلك —", "err")
+        self._say("الرفع عبر السلك في الفيرموير الرسمي يعمل عبر منفذ REPL؛ اختر «تلقائي» أو «LEGO رسمي» من قائمة الفرموير.", "info")
+        raise RuntimeError("واجهة Pybricks (0xFF) غير موجودة — غيّر وضع الفرموير أو استخدم البلوتوث")
 
     def _install_capture(self, hub) -> None:
         cap = HubCapture(self.queue)
@@ -1512,6 +1632,20 @@ class App:
 
     async def op_send_run(self, path, wait):
         hub = self._hub_or_raise()
+        if self._is_official_hub(hub):
+            # Official firmware path: stop + run(path) directly (USB REPL or error).
+            self._say(f"جاري الإرسال عبر الفيرموير الرسمي: {os.path.basename(path)} ...")
+            try:
+                await hub.stop_user_program()
+            except Exception:
+                pass
+            await self._transfer_stage(hub, "official-run", lambda: hub.run(
+                path, wait=wait, print_output=False, line_handler=True))
+            if wait:
+                self._say("انتهى تنفيذ البرنامج ✔", "ok")
+            else:
+                self._say("تم الإرسال والتشغيل ✔ — يبدأ البرنامج فوراً", "ok")
+            return
         await self._quiet_stop(hub)
         if getattr(hub, "_mpy_abi_version", 0):
             # Older hubs do not support run(None). Preserve the library fallback.
@@ -1532,6 +1666,10 @@ class App:
 
     async def op_download_only(self, path):
         hub = self._hub_or_raise()
+        if self._is_official_hub(hub):
+            raise RuntimeError(
+                "الخيار «تحميل فقط» غير مدعوم على الفيرموير الرسمي عبر هذا التطبيق. "
+                "استخدم «إرسال وتشغيل» أو ثبّت Pybricks.")
         await self._quiet_stop(hub)
         self._say(f"جاري التحميل بدون تشغيل: {os.path.basename(path)} ...")
         await self._download_program(hub, path)
@@ -1539,6 +1677,9 @@ class App:
 
     async def op_run_stored(self):
         hub = self._hub_or_raise()
+        if self._is_official_hub(hub):
+            raise RuntimeError(
+                "«تشغيل المخزن» غير مدعوم على الفيرموير الرسمي. استخدم «إرسال وتشغيل» مباشرة.")
         if self._download_uncertain:
             raise RuntimeError("فشل رفع سابق أو تم إلغاؤه؛ أعد تحميل ملف كامل بنجاح قبل تشغيل المخزن")
         await self._quiet_stop(hub)

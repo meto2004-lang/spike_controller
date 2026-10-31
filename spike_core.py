@@ -50,6 +50,9 @@ def validated_config(data, defaults: dict) -> dict:
     name = data.get("hub_name")
     if isinstance(name, str) and len(name) <= 128 and all(ord(c) >= 32 for c in name):
         cfg["hub_name"] = name.strip()
+    fw_mode = data.get("firmware_mode")
+    if fw_mode in ("auto", "Pybricks", "LEGO رسمي"):
+        cfg["firmware_mode"] = fw_mode
     recent = data.get("recent")
     if isinstance(recent, list):
         cfg["recent"] = list(dict.fromkeys(x for x in recent if isinstance(x, str) and x and "\0" not in x))[:6]
