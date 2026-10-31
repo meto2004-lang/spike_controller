@@ -492,36 +492,28 @@ class OfficialUSBREPL:
         self._running = False
         self._stop_event = asyncio.Event()
         self._write_lock = asyncio.Lock()
+        self._pause_reader = None
 
     async def connect(self) -> None:
         loop = asyncio.get_running_loop()
-        # pyserial opens in a blocking way; do it in an executor.
         self._ser = await loop.run_in_executor(
             None, lambda: _serial.Serial(self.port, 115200, timeout=0.2))
-        # Enter raw REPL
-        await self._drain_input()
-        self._ser.write(self.CTRL_C)
-        await asyncio.sleep(0.1)
-        await self._drain_input()
-        self._ser.write(self.CTRL_A)
-        await asyncio.sleep(0.2)
-        head = await self._read_until(self.PROMPT_RAW, timeout=2.0)
-        if self.PROMPT_RAW not in head:
-            # Try leaving raw-paste mode if the hub was left in it.
-            self._ser.write(self.CTRL_B)
-            await asyncio.sleep(0.2)
-            await self._drain_input()
-            self._ser.write(self.CTRL_C + self.CTRL_A)
-            await asyncio.sleep(0.3)
-            head = await self._read_until(self.PROMPT_RAW, timeout=2.0)
-            if self.PROMPT_RAW not in head:
-                raise RuntimeError(
-                    f"لم أستطع الدخول إلى raw REPL على {self.port}. "
-                    "تأكد أن المنفذ هو REPL الخاص بالروبوت (الفيرموير الرسمي)."
-                )
+        # Reset into raw REPL using the robust sequence (several attempts).
+        try:
+            banner = await self._reset_to_raw_repl()
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"لم أستطع الدخول إلى raw REPL على {self.port}. "
+                "تأكد أن المنفذ هو REPL الخاص بالروبوت (الفيرموير الرسمي) وأنه "
+                "لا يوجد تطبيق آخر متصل بالمنفذ.\n"
+                f"التفاصيل: {exc}"
+            )
         if self._state_cb:
             self._state_cb(2)  # CONNECTED
-        # Query firmware version (MicroPython banner or sys.implementation).
+        # Start background reader FIRST so FW query output is captured
+        # correctly, then run the quiet firmware snippet.
+        self._reader_task = asyncio.create_task(self._reader())
+        await asyncio.sleep(0.05)
         await self._exec_snippet(
             "import sys,os\n"
             "try:\n"
@@ -530,11 +522,14 @@ class OfficialUSBREPL:
             " print('FW:? '+repr(e))\n",
             quiet=True,
         )
-        # Start reader
-        self._reader_task = asyncio.create_task(self._reader())
 
     async def disconnect(self) -> None:
         self._stop_event.set()
+        # If the reader is paused for a REPL command, release it so cancel
+        # can clean it up promptly instead of leaving it stuck on _paused.wait().
+        if self._pause_reader is not None:
+            self._pause_reader[1].set()  # release paused barrier
+            self._pause_reader[2].set()  # release resume event
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
@@ -542,6 +537,7 @@ class OfficialUSBREPL:
             except Exception:
                 pass
             self._reader_task = None
+        self._pause_reader = None
         # Leave raw REPL
         if self._ser is not None:
             try:
@@ -578,10 +574,16 @@ class OfficialUSBREPL:
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, lambda: self._ser.reset_input_buffer())
 
-    async def _read_some(self, timeout: float = 0.2) -> bytes:
+    async def _read_some(self, size: int = 4096, timeout: float = 0.2) -> bytes:
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, lambda: self._ser.read(4096) if self._ser else b"")
+        if self._ser is None:
+            return b""
+        old_timeout = self._ser.timeout
+        self._ser.timeout = max(0.01, timeout)
+        try:
+            return await loop.run_in_executor(None, lambda: self._ser.read(size))
+        finally:
+            self._ser.timeout = old_timeout
 
     async def _read_until(self, marker: bytes, timeout: float = 2.0) -> bytes:
         loop = asyncio.get_running_loop()
@@ -600,8 +602,18 @@ class OfficialUSBREPL:
         self._rx_buf = b""
         try:
             while not self._stop_event.is_set():
-                chunk = await loop.run_in_executor(
-                    None, lambda: self._ser.read(512) if self._ser else b"")
+                pause = getattr(self, "_pause_reader", None)
+                if pause is not None:
+                    paused_evt, resume_evt = pause
+                    # Acknowledge the pause and wait until resumed.
+                    resume_evt.clear()
+                    paused_evt.set()
+                    try:
+                        await resume_evt.wait()
+                    except asyncio.CancelledError:
+                        raise
+                    continue
+                chunk = await self._read_some(size=512, timeout=0.2)
                 if not chunk:
                     await asyncio.sleep(0.02)
                     continue
@@ -633,59 +645,102 @@ class OfficialUSBREPL:
             source = f.read()
         await self._exec_snippet(source, wait=wait)
 
+    async def _reset_to_raw_repl(self, attempts: int = 3) -> bytes:
+        """Interrupt any running program and get to the raw-REPL prompt.
+        Returns any banner/noise received before the prompt (for debugging).
+        """
+        loop = asyncio.get_running_loop()
+        seen = b""
+        for i in range(attempts):
+            # Soft reset of REPL state: send several CTRL-C to interrupt,
+            # then CTRL-B to force friendly REPL, then CTRL-C again, then CTRL-A
+            # to enter raw mode. This matches the stock ampy/pyboard sequence.
+            self._ser.write(self.CTRL_C + self.CTRL_C)
+            await asyncio.sleep(0.2)
+            self._ser.write(self.CTRL_B)
+            await asyncio.sleep(0.2)
+            await loop.run_in_executor(None, lambda: self._ser.reset_input_buffer())
+            self._ser.write(self.CTRL_C)
+            await asyncio.sleep(0.15)
+            self._ser.write(self.CTRL_A)
+            await asyncio.sleep(0.3)
+            head = await self._read_until(self.PROMPT_RAW, timeout=2.5)
+            seen += head
+            if self.PROMPT_RAW in head:
+                return seen
+        raise RuntimeError(
+            "تعذر الدخول إلى raw REPL (لم نرَ رسالة البدء). "
+            "آخر ما وصل من المنفذ: " + repr(seen[-200:])
+        )
+
     async def _exec_snippet(self, source: str, *, wait: bool = False,
                             quiet: bool = False) -> None:
         if self._ser is None:
             raise RuntimeError("منفذ السلك غير مفتوح")
         loop = asyncio.get_running_loop()
-        # Interrupt any running program first.
-        self._ser.write(self.CTRL_C)
-        await asyncio.sleep(0.15)
-        await self._drain_input()
-        # Enter raw REPL
-        self._ser.write(self.CTRL_A)
-        await asyncio.sleep(0.2)
-        prompt = await self._read_until(self.PROMPT_RAW, timeout=3.0)
-        if self.PROMPT_RAW not in prompt:
-            raise RuntimeError("تعذر الدخول إلى raw REPL (لم نرَ رسالة البدء)")
-        # Clear accumulated reader state by draining the input buffer once more
-        await loop.run_in_executor(None, lambda: self._ser.reset_input_buffer())
 
-        # Send the script line-by-line; in raw REPL MicroPython accepts each
-        # line ending with \r, then compiles+executes on CTRL-D.
-        async with self._write_lock:
-            for line in source.split("\n"):
-                chunk = (line + "\r").encode("utf-8")
-                self._ser.write(chunk)
-                await asyncio.sleep(0.003)
-            self._ser.write(self.CTRL_D)
-
-        self._running = True
-        if self._status_cb:
-            self._status_cb(1 << 6)
+        # The background reader task also reads from self._ser; let it finish
+        # processing anything already queued and pause it while we do REPL
+        # command traffic so we don't compete for bytes off the wire.
+        reader_paused = asyncio.Event()
+        resume_reader = asyncio.Event()
+        if self._reader_task is not None and not self._reader_task.done():
+            self._pause_reader = (reader_paused, resume_reader)
+            reader_paused.set()
+            try:
+                await asyncio.wait_for(resume_reader.wait(), timeout=0.5)
+            except asyncio.TimeoutError:
+                pass
         try:
-            if wait:
-                # After CTRL-D, MicroPython prints stdout/stderr followed by OK
-                # and a fresh ">" raw prompt. Poll for ">" with preceding OK.
+            banner = await self._reset_to_raw_repl()
+            if not quiet and banner.strip():
+                # Deliver any pre-prompt banner to the console (e.g. FW info).
+                for line in banner.splitlines():
+                    line = bytes(b for b in line if b >= 0x20 or b in (0x09,))
+                    if not line:
+                        continue
+                    self._feed_to_delivery(line + b"\n")
+            # Send the script line-by-line; raw REPL accepts lines ending in \r
+            # and compiles/executes on CTRL-D.
+            async with self._write_lock:
+                for line in source.split("\n"):
+                    chunk = (line + "\r").encode("utf-8")
+                    self._ser.write(chunk)
+                    await asyncio.sleep(0.002)
+                self._ser.write(self.CTRL_D)
+
+            self._running = True
+            if self._status_cb:
+                self._status_cb(1 << 6)
+            try:
+                # Read output until we see the raw-prompt ">" return.
                 deadline = loop.time() + 300.0
                 tail = b""
+                idle_since = loop.time()
                 while loop.time() < deadline:
-                    chunk = await loop.run_in_executor(
-                        None, lambda: self._ser.read(4096) if self._ser else b"")
+                    chunk = await self._read_some(size=4096, timeout=0.5)
                     if chunk:
                         self._feed_to_delivery(chunk)
-                        tail = (tail + chunk)[-32:]
-                        # Finished when we see the raw prompt marker ">".
+                        tail = (tail + chunk)[-64:]
+                        idle_since = loop.time()
                         if b">" in tail:
-                            break
+                            # Confirm it's the prompt: after "OK" or at end
+                            # of a burst, not just a '>' inside program output.
+                            if tail.rstrip().endswith(b">") or b"OK" in tail[-8:]:
+                                break
                     else:
-                        await asyncio.sleep(0.03)
-                else:
-                    raise TimeoutError("انتهت مهلة انتظار انتهاء البرنامج على الفيرموير الرسمي")
+                        if not wait and (loop.time() - idle_since) > 0.6:
+                            # In non-wait mode, leave the program running and
+                            # yield; the background reader will keep streaming.
+                            break
+                        await asyncio.sleep(0.02)
+            finally:
+                self._running = False
+                if self._status_cb:
+                    self._status_cb(0)
         finally:
-            self._running = False
-            if self._status_cb:
-                self._status_cb(0)
+            self._pause_reader = None
+            resume_reader.set()
 
     def _feed_to_delivery(self, chunk: bytes) -> None:
         """Split incoming raw bytes at newlines and pass to the line handler."""
