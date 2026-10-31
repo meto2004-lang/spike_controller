@@ -232,55 +232,87 @@ class OfficialBLEHub:
         await asyncio.wait_for(client.connect(), timeout=30.0)
         self._client = client
 
-        # امنح ويندوز وقتاً لاكتشاف الخدمات قبل قراءتها.
-        await asyncio.sleep(0.5)
+        # بعض خلفيات ويندوز/BlueZ لا تُنهي اكتشاف الخدمات فوراً بعد connect().
+        # نطلبها صراحة ثم ننتظر قليلاً.
+        try:
+            await asyncio.wait_for(client.get_services(), timeout=15.0)
+        except Exception:
+            pass
+        await asyncio.sleep(1.0)
 
         services = client.services
-        # حدد زوج الخصائص (notify + write) من خدمة LEGO Hub، ثم من Nordic UART.
         tx_uuid = rx_uuid = None
-        # خدمة LEGO Hub 1623
+        # احصر جميع الخدمات والخصائص في بنية آمنة قبل البحث.
+        svc_info = [svc.uuid for svc in services]
+        all_characteristics = []
         for svc in services:
-            if svc.uuid.lower() == LEGO_HUB_SERVICE_UUID:
-                for ch in svc.characteristics:
-                    props = ch.properties or []
-                    if "notify" in props or "indicate" in props:
-                        tx_uuid = ch.uuid
-                    if "write-without-response" in props or "write" in props:
-                        rx_uuid = ch.uuid
-                break
-        # إن لم نجد الخدمة الأصلية، ابحث في كل الخدمات عن خصائص notify/write
-        # تحت معرفات LEGO المألوفة في نطاق 1620–1626.
+            for ch in svc.characteristics:
+                all_characteristics.append(
+                    (svc.uuid, ch.uuid.lower(), list(ch.properties or []), ch))
+
+        # 1) خدمة LEGO Hub الرسمية 1623 مع خصائص Inbox (1624) و Outbox (1625).
+        for _svc, cl, props, ch in all_characteristics:
+            if _svc.lower() != LEGO_HUB_SERVICE_UUID:
+                continue
+            if ("notify" in props or "indicate" in props) and tx_uuid is None \
+                    and LEGO_HUB_CHAR_OUTBOX in cl:
+                tx_uuid = ch.uuid
+            if ("write" in props or "write-without-response" in props) and rx_uuid is None \
+                    and LEGO_HUB_CHAR_INBOX in cl:
+                rx_uuid = ch.uuid
+
+
+        # 2) ابحث في كل الخدمات عن خصائص تنتمي لعائلة LEGO 162x إن لم نجد 1624/1625 مباشرة.
         if not (tx_uuid and rx_uuid):
-            for svc in services:
-                for ch in svc.characteristics:
-                    cl = ch.uuid.lower()
-                    props = ch.properties or []
-                    if tx_uuid is None and ("notify" in props or "indicate" in props)                             and ("1625" in cl or "6e400003" in cl or cl.endswith("aeef")):
+            for _svc, cl, props, ch in all_characteristics:
+                if "162" in cl:
+                    if ("notify" in props or "indicate" in props) and tx_uuid is None \
+                            and ("1625" in cl or "1626" in cl or "1627" in cl):
                         tx_uuid = ch.uuid
-                    if rx_uuid is None and ("write" in props or "write-without-response" in props)                             and ("1624" in cl or "6e400002" in cl or cl.endswith("aeef")):
+                    if ("write" in props or "write-without-response" in props) and rx_uuid is None \
+                            and ("1624" in cl or "1626" in cl):
                         rx_uuid = ch.uuid
-            # fallback: NUS
+
+        # 3) Nordic UART fallback
         if not (tx_uuid and rx_uuid):
-            for svc in services:
-                if svc.uuid.lower() == NUS_SERVICE_UUID:
-                    for ch in svc.characteristics:
-                        props = ch.properties or []
-                        if "notify" in props and tx_uuid is None:
-                            tx_uuid = ch.uuid
-                        if ("write" in props or "write-without-response" in props) and rx_uuid is None:
-                            rx_uuid = ch.uuid
+            for _svc, cl, props, ch in all_characteristics:
+                if NUS_TX_UUID in cl and ("notify" in props or "indicate" in props):
+                    tx_uuid = ch.uuid
+                if NUS_RX_UUID in cl and ("write" in props or "write-without-response" in props):
+                    rx_uuid = ch.uuid
+
+        # 4) Last resort: أي زوج notify+write من خدمة LEGO (تنتهي بـ aeef)
+        if not (tx_uuid and rx_uuid):
+            any_notify_lego = any_write_lego = None
+            any_notify = any_write = None
+            for _svc, cl, props, ch in all_characteristics:
+                is_lego = "efde-1623-785feabcd123" in cl or "aeef" in cl
+                if ("notify" in props or "indicate" in props):
+                    if any_notify is None:
+                        any_notify = ch.uuid
+                    if is_lego and any_notify_lego is None:
+                        any_notify_lego = ch.uuid
+                if ("write" in props or "write-without-response" in props):
+                    if any_write is None:
+                        any_write = ch.uuid
+                    if is_lego and any_write_lego is None:
+                        any_write_lego = ch.uuid
+            if any_notify_lego and any_write_lego:
+                tx_uuid, rx_uuid = any_notify_lego, any_write_lego
+            elif any_notify and any_write:
+                tx_uuid, rx_uuid = any_notify, any_write
 
         if not (tx_uuid and rx_uuid):
-            # سجّل ما وجدناه للمساعدة في التشخيص.
-            svc_info = []
-            for svc in services:
-                svc_info.append(svc.uuid)
             await client.disconnect()
+            diag = "; ".join(str(s) for s in svc_info[:8])
+            if len(svc_info) > 8:
+                diag += f" ... (+{len(svc_info)-8})"
             raise RuntimeError(
-                "تعذر العثور على خصائص الكتابة والإشعار لدى الروبوت "
-                f"(عدد الخدمات المكتشفة: {len(services)}). "
-                "قد يكون الروبوت متصلاً بتطبيق آخر (مثل LEGO SPIKE/Powered Up). "
-                "أغلق التطبيقات الأخرى، وأوقف البلوتوث ثم شغّله من جديد، وأعد المحاولة.")
+                "تعذر العثور على خصائص الكتابة والإشعار لدى الروبوت. "
+                f"عدد الخدمات المكتشفة: {len(svc_info)}. "
+                "قد يكون الروبوت متصلاً بتطبيق آخر (LEGO SPIKE / Powered Up) "
+                "أو ما زال في وضع الإقلاع. أغلق التطبيقات الأخرى، "
+                "افصل البلوتوث ثم أعد تشغيله، وأعد المحاولة.")
         self._tx_uuid, self._rx_uuid = tx_uuid, rx_uuid
 
         await client.start_notify(tx_uuid, self._on_notify)
