@@ -343,6 +343,19 @@ class App:
 
         os.makedirs(LOG_DIR, exist_ok=True)
 
+        # أنشئ متغيرات الواجهة مُبكّراً حتى لو استُدعيت الأفعال من أي مسار
+        # (مثل الاختصارات أو autoconnect) قبل أن يكتمل بناء شريط الأدوات.
+        self._fw_internal = self.cfg.get("firmware_mode", "auto")
+        self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
+        self.firmware_var = tk.StringVar(value=self._fw_label(self._fw_internal))
+        self._toolbar_images = {}
+        self.fw_combo = None
+        self.toolbar_buttons = ()
+        self.btn_connect = self.btn_disconnect = self.btn_send = self.btn_stop = None
+        self.options_button = self.tools_button = None
+        self.options_menu = self.tools_menu = None
+        self._action_entries = {}
+
         self._build_style()
         self._build_ui()
         self._bind_shortcuts()
@@ -655,8 +668,6 @@ class App:
             self._add_toolbar_action(self.tools_menu, key, title, icon, command, shortcut)
         target = ttk.Frame(self.toolbar)
         target.grid(row=0, column=6, sticky="ew", padx=(8, 0))
-        self._fw_internal = self.cfg.get("firmware_mode", "auto")
-        self.firmware_var = tk.StringVar(value=self._fw_label(self._fw_internal))
         fw_frame = ttk.Frame(target)
         fw_frame.pack(side="right", padx=(6, 0))
         ttk.Label(fw_frame, text=to_visual("الفرموير:"), style="Header.TLabel").pack(side="right", padx=2)
@@ -664,6 +675,10 @@ class App:
                                      values=(to_visual("تلقائي"), "Pybricks", to_visual("LEGO رسمي")))
         self.fw_combo.pack(side="right")
         self.fw_combo.bind("<<ComboboxSelected>>", lambda e: self._save_firmware_mode())
+        ttk.Label(target, text=to_visual("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
+        self.target_entry = ttk.Entry(target, textvariable=self.target_var, width=1)
+        self.target_entry.pack(side="left", fill="x", expand=True)
+        self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_send, self.btn_stop)
 
     @staticmethod
     def _fw_label(mode: str) -> str:
@@ -674,11 +689,6 @@ class App:
         table = {"تلقائي": "auto", "Pybricks": "Pybricks", "LEGO رسمي": "LEGO رسمي",
                  "auto": "auto"}
         return table.get(label, "auto")
-        ttk.Label(target, text=to_visual("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
-        self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
-        self.target_entry = ttk.Entry(target, textvariable=self.target_var, width=1)
-        self.target_entry.pack(side="left", fill="x", expand=True)
-        self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_send, self.btn_stop)
 
     def _add_toolbar_action(self, menu, key, title, icon, command, shortcut):
         menu.add_command(label=to_visual(title), image=self._toolbar_images[icon][0], compound="left",
