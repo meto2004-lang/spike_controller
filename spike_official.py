@@ -220,17 +220,10 @@ class OfficialBLEHub:
     # ---- connection lifecycle ----
     async def connect(self) -> None:
         self.connection_state_observable.on_next(_ConnectionSubject.CONNECTING)
-        # Discover the hub: match by name OR by service UUID
-        dev = None
-        if self.target_name:
-            dev = await BleakScanner.find_device_by_name(
-                self.target_name, timeout=self.scan_timeout)
-        if dev is None:
-            dev = await BleakScanner.find_device_by_filter(
-                lambda d, adv: LEGO_HUB_SERVICE_UUID.lower() in [
-                    s.lower() for s in (adv.service_uuids or [])],
-                timeout=self.scan_timeout,
-            )
+        # استخدم المسح المحسَّن الذي يتعرّف على الفيرموير الرسمي باسم الجهاز
+        # وبيانات المصنّع وخدمات BLE، لا على service_uuids فقط.
+        dev = await find_official_device(
+            name=self.target_name, timeout=self.scan_timeout)
         if dev is None:
             raise asyncio.TimeoutError(
                 "لم يُعثر على أي روبوت LEGO يعمل بالفيرموير الرسمي عبر البلوتوث"
@@ -754,21 +747,71 @@ class OfficialUSBCDC:
 # ---------------------------------------------------------------------------
 # Scanning helper: find an official-firmware hub over BLE
 # ---------------------------------------------------------------------------
-async def find_official_device(name: Optional[str] = None, timeout: float = 20.0):
-    """Return a bleak BLEDevice for an official LEGO hub, or None."""
+# Patterns in the local name commonly advertised by official firmware:
+#   * "SPIKE"          (SPIKE Prime default pairing name: SPIKE Prime, Technic SMALL Hub)
+#   * "HUB-"           (MINDSTORMS Robot Inventor default name prefix)
+#   * "TrainHub"       (Powered Up hub)
+#   * "Move Hub"       (Boost)
+# We also fall back to manufacturer-data ID 0x0397 (LEGO System A/S).
+_LEGO_NAME_PREFIXES = ("SPIKE", "HUB-", "TRAIN", "TRAINHUB", "MOVE HUB", "CITY", "DUPL", "TECHNIC")
+_LEGO_MANUFACTURER_ID = 0x0397  # LEGO System A/S
+
+
+async def find_official_device(name: Optional[str] = None, timeout: float = 20.0,
+                               name_hint: Optional[str] = None):
+    """Return a bleak BLEDevice for an official LEGO hub, or None.
+
+    Discovery uses three filters (any hit qualifies):
+      1. Exact/local name match (if user typed a name in the target field).
+      2. Advertised LEGO Hub service UUID (``1623-…``) or Nordic UART fallback.
+      3. BLE manufacturer data with LEGO's company ID (0x0397) **and** a
+         local name that starts with a known LEGO hub prefix.
+      4. Local name starts with one of the common LEGO hub prefixes even when
+         no service UUIDs are advertised (some firmware builds hide services
+         until pairing).
+    """
     if not BLEAK_OK:
         raise RuntimeError(f"bleak غير متوفر: {BLEAK_ERR}")
+
+    target_name = (name or name_hint or "").strip()
+
+    if target_name:
+        dev = await BleakScanner.find_device_by_name(target_name, timeout=timeout)
+        if dev is not None:
+            return dev
+
+    def _name(d, adv) -> str:
+        local = getattr(adv, "local_name", None) or ""
+        return (local or (getattr(d, "name", "") or "")).upper()
 
     def match(d, adv):
         uuids = [s.lower() for s in (adv.service_uuids or [])]
         if LEGO_HUB_SERVICE_UUID in uuids:
             return True
+        if NUS_SERVICE_UUID in uuids:
+            # NUS alone is ambiguous (lots of devices advertise it). Only accept
+            # it when the name also looks like a LEGO hub.
+            nm = _name(d, adv)
+            if any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
+                return True
+            return False
+        # Manufacturer data filter
+        md = getattr(adv, "manufacturer_data", None) or {}
+        if _LEGO_MANUFACTURER_ID in md:
+            nm = _name(d, adv)
+            # Accept any LEGO-manufacturer device whose name starts with one of
+            # the known hub prefixes (avoids picking up LEGO remotes/handset).
+            if nm and any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
+                return True
+        # Name-only fallback (some FW builds hide all service UUIDs before pairing).
+        nm = _name(d, adv)
+        if nm and any(nm.startswith(p) for p in _LEGO_NAME_PREFIXES):
+            # Extra guard: device must also have address (it will) and a
+            # transmit power/rssi to avoid phantom entries.
+            if getattr(d, "address", None):
+                return True
         return False
 
-    if name:
-        dev = await BleakScanner.find_device_by_name(name, timeout=timeout)
-        if dev is not None:
-            return dev
     return await BleakScanner.find_device_by_filter(match, timeout=timeout)
 
 

@@ -345,7 +345,17 @@ class App:
 
         # أنشئ متغيرات الواجهة مُبكّراً حتى لو استُدعيت الأفعال من أي مسار
         # (مثل الاختصارات أو autoconnect) قبل أن يكتمل بناء شريط الأدوات.
-        self._fw_internal = self.cfg.get("firmware_mode", "auto")
+        # تعيين خريطة العرض والقيم الداخلية مبكراً (نسخة مكررة عما في _build_toolbar
+        # حتى تكون متاحة قبل بناء شريط الأدوات).
+        self._fw_display = {
+            "auto":            "تلقائي",
+            "pybricks":        "Pybricks",
+            "official-lego":   "LEGO رسمي",
+        }
+        self._FW_MODES = tuple(self._fw_display.keys())
+        self._fw_keys = list(self._fw_display.keys())
+        self._fw_internal = self._normalise_fw_mode(self.cfg.get("firmware_mode", "auto"))
+        self.cfg["firmware_mode"] = self._fw_internal
         self.target_var = tk.StringVar(value=self.cfg.get("hub_name", ""))
         self.firmware_var = tk.StringVar(value=self._fw_label(self._fw_internal))
         self._toolbar_images = {}
@@ -671,8 +681,10 @@ class App:
         fw_frame = ttk.Frame(target)
         fw_frame.pack(side="right", padx=(6, 0))
         ttk.Label(fw_frame, text=to_visual("الفرموير:"), style="Header.TLabel").pack(side="right", padx=2)
-        self.fw_combo = ttk.Combobox(fw_frame, textvariable=self.firmware_var, width=14, state="readonly",
-                                     values=(to_visual("تلقائي"), "Pybricks", to_visual("LEGO رسمي")))
+        self.fw_combo = ttk.Combobox(
+            fw_frame, textvariable=self.firmware_var, width=14, state="readonly",
+            values=[self._fw_display[k] for k in self._fw_keys],
+        )
         self.fw_combo.pack(side="right")
         self.fw_combo.bind("<<ComboboxSelected>>", lambda e: self._save_firmware_mode())
         ttk.Label(target, text=to_visual("الروبوت:"), style="Header.TLabel").pack(side="right", padx=4)
@@ -680,15 +692,31 @@ class App:
         self.target_entry.pack(side="left", fill="x", expand=True)
         self.toolbar_buttons = (self.btn_connect, self.btn_disconnect, self.btn_send, self.btn_stop)
 
-    @staticmethod
-    def _fw_label(mode: str) -> str:
-        return {"auto": "تلقائي", "Pybricks": "Pybricks", "LEGO رسمي": "LEGO رسمي"}.get(mode, "تلقائي")
+    def _normalise_fw_mode(self, mode) -> str:
+        """تطبيع قيمة الفرموير من إعدادات قديمة/جديدة إلى مفتاح داخلي ثابت."""
+        if mode in ("pybricks", "Pybricks"):
+            return "pybricks"
+        if mode in ("official-lego", "LEGO رسمي", "LEGO", "official"):
+            return "official-lego"
+        return "auto"
 
-    @staticmethod
-    def _fw_from_label(label: str) -> str:
-        table = {"تلقائي": "auto", "Pybricks": "Pybricks", "LEGO رسمي": "LEGO رسمي",
-                 "auto": "auto"}
-        return table.get(label, "auto")
+    def _fw_label(self, mode: str) -> str:
+        # آمن قبل بناء _fw_display في __init__ أيضاً.
+        table = getattr(self, "_fw_display", None) or {
+            "auto": "تلقائي", "pybricks": "Pybricks", "official-lego": "LEGO رسمي",
+        }
+        return table.get(self._normalise_fw_mode(mode), table["auto"])
+
+    def _fw_from_label(self, label: str) -> str:
+        # مطابقة مرنة: مفتاح، أو النص الظاهر (مع/بدون تشكيل عربي)، أو إعدادات قديمة.
+        norm = self._normalise_fw_mode(label)
+        if norm != "auto":
+            return norm
+        table = getattr(self, "_fw_display", {})
+        for key, visible in table.items():
+            if label == visible or label == to_visual(visible):
+                return key
+        return "auto"
 
     def _add_toolbar_action(self, menu, key, title, icon, command, shortcut):
         menu.add_command(label=to_visual(title), image=self._toolbar_images[icon][0], compound="left",
@@ -750,9 +778,11 @@ class App:
 
     def _save_firmware_mode(self):
         mode = self._fw_from_label(self.firmware_var.get())
-        if mode in ("auto", "Pybricks", "LEGO رسمي"):
+        if mode in self._FW_MODES:
             self.cfg["firmware_mode"] = mode
             self._fw_internal = mode
+            # حدّث النص الظاهر في الـ Combobox ليتطابق (مهم إن وُصلت قيمة مشكّلة)
+            self.firmware_var.set(self._fw_label(mode))
             self.console(f"تم تبديل وضع الفرموير إلى: {self._fw_label(mode)}", "info")
 
     def _build_menu(self) -> None:
@@ -1379,20 +1409,30 @@ class App:
         return self._worker_hub
 
     def _firmware_modes_wanted(self):
-        """Return ordered list of firmware backends to try: 'pybricks' and/or 'official'."""
-        mode = self.cfg.get("firmware_mode", "auto")
-        if mode == "Pybricks":
+        """Return ordered list of firmware backends to try: 'pybricks' and/or 'official-lego'."""
+        mode = self._normalise_fw_mode(self.cfg.get("firmware_mode", "auto"))
+        if mode == "pybricks":
             return ["pybricks"]
-        if mode == "LEGO رسمي":
-            return ["official"]
-        return ["pybricks", "official"]
+        if mode == "official-lego":
+            return ["official-lego"]
+        # الوضع التلقائي: جرّب Pybricks مرّة أو اثنتين ثم انتقل إلى الرسمي حتى لا نبتلع
+        # دقيقتين قبل الوصول للباك اند الصحيح.
+        return ["pybricks", "official-lego"]
+
+    def _retries_for_backend(self, backend: str) -> int:
+        """عدد المحاولات لكل باك اند. Pybricks في الوضع التلقائي يأخذ محاولتين فقط."""
+        total = int(self.cfg.get("retries", 6))
+        wanted = self._firmware_modes_wanted()
+        if len(wanted) > 1 and backend == "pybricks":
+            return min(2, total)
+        return total
 
     async def op_connect(self, target=None):
         wanted = self._firmware_modes_wanted()
         scan = int(self.cfg.get("scan_timeout", 20))
-        retries = int(self.cfg.get("retries", 6))
         last_err = None
         for backend in wanted:
+            retries = self._retries_for_backend(backend)
             for attempt in range(1, retries + 1):
                 label = "Pybricks" if backend == "pybricks" else "الفيرموير الرسمي (LEGO)"
                 self._say(f"[{label}] المحاولة {attempt}/{retries} — جاري البحث عن الروبوت...")
@@ -1401,10 +1441,18 @@ class App:
                         last_err = f"pybricksdev غير متوفر: {PB_ERR}"
                         break
                     try:
-                        dev = await find_device(target or None, timeout=scan // max(1, len(wanted)))
+                        # استخدم مهلة المسح الكاملة في أول محاولة، ونصفها في البقية لتسريع التبديل.
+                        t = scan if attempt == 1 else max(8, scan // 2)
+                        dev = await find_device(target or None, timeout=t)
                     except asyncio.TimeoutError:
-                        self._say("لم يُعثر على روبوت Pybricks — سأحاول الفيرموير الرسمي إن اخترت الوضع التلقائي",
-                                  "info" if "official" in wanted else "err")
+                        if "official-lego" in wanted and attempt == retries:
+                            self._say("لم يُعثر على روبوت Pybricks — سأحاول الفيرموير الرسمي...", "info")
+                        else:
+                            self._say(
+                                "لم يُعثر على روبوت Pybricks" +
+                                (" — سأحاول الفيرموير الرسمي..." if ("official-lego" in wanted and attempt == retries) else ""),
+                                "info" if "official-lego" in wanted else "err",
+                            )
                         continue
                     hub = PybricksHubBLE(dev)
                     try:
@@ -1434,19 +1482,24 @@ class App:
                         self._worker_hub = None
                         raise
                     return hub
-                else:  # official firmware via BLE (LWP3)
+                else:  # official-lego firmware via BLE (LWP3)
                     if not OFFICIAL_BLEAK_OK:
                         last_err = f"مكتبة bleak غير متوفرة للفيرموير الرسمي: {OFFICIAL_BLEAK_ERR}"
                         break
                     try:
-                        dev = await find_official_device(target or None, timeout=scan // max(1, len(wanted)))
+                        t = scan if attempt == 1 else max(10, scan // 2)
+                        dev = await find_official_device(
+                            target or None, timeout=t,
+                            name_hint=target or None,
+                        )
                     except asyncio.TimeoutError:
-                        self._say("لم يُعثر على روبوت بالفيرموير الرسمي", "err")
+                        self._say("انتهت مهلة البحث عن روبوت الفيرموير الرسمي (بلوتوث)", "err")
                         continue
                     if dev is None:
-                        self._say("لم يُعثر على روبوت LEGO رسمي عبر البلوتوث", "info")
+                        self._say("لم يُعثر على روبوت LEGO رسمي عبر البلوتوث. "
+                                  "تأكد أنه مضاء، يرمش أزرق، وغير متصل بتطبيق آخر.", "info")
                         continue
-                    hub = OfficialBLEHub(target_name=target, scan_timeout=scan // max(1, len(wanted)))
+                    hub = OfficialBLEHub(target_name=getattr(dev, "name", target), scan_timeout=scan)
                     try:
                         await asyncio.wait_for(hub.connect(), timeout=60)
                     except asyncio.CancelledError:
@@ -1462,7 +1515,7 @@ class App:
                         continue
                     self._say(f"تم الاتصال بـ {hub._app_label} — الفرموير {hub.fw_version}", "ok")
                     self._say(
-                        "ملاحظة: الفيرموير الرسمي لا يدعم رفع بايثون عبر البلوتوث. "
+                        "ملاحظة: الفيرموير الرسمي عبر البلوتوث يتيح الاستقبال فقط؛ "
                         "لإرسال البرامج استخدم «اتصال USB» (منفذ REPL).", "info")
                     self._worker_hub = hub
                     try:
@@ -1524,7 +1577,7 @@ class App:
                         return hub
 
         # 2) Official-firmware USB CDC (MicroPython raw REPL) path.
-        if "official" in wanted:
+        if "official-lego" in wanted:
             port = self._find_hub_port()
             if port:
                 self._say(f"تم العثور على منفذ REPL الرسمي: {port}", "info")
